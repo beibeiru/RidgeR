@@ -1,0 +1,34 @@
+
+<!-- README.md is generated from README.Rmd. Please edit that file -->
+
+# SecAct: Secreted Protein Activity Inference
+
+## Installation
+
+To install `RidgeR`, we recommend using `devtools`:
+
+``` r
+# install.packages("devtools")
+devtools::install_github("beibeiru/RidgeR")
+```
+
+The package has been installed successfully on Operating Systems:
+
+- Red Hat Enterprise Linux 8.10 (Ootpa)
+- macOS Sequoia 15.3.1
+
+## Example
+
+``` r
+library(RidgeR)
+
+dataPath <- file.path(system.file(package = "RidgeR"), "extdata/")
+expr.diff <- read.table(paste0(dataPath, "Ly86-Fc_vs_Vehicle_logFC.txt"))
+
+# infer activity; ~2 mins
+res.old <- SecAct.inference.gsl.old(expr.diff) 
+head(res.old$zscore)
+
+res.new <- SecAct.inference.gsl.new(expr.diff) 
+head(res.new$zscore)
+```
