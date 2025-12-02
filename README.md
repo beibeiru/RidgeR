@@ -22,13 +22,24 @@ The package has been installed successfully on Operating Systems:
 ``` r
 library(RidgeR)
 
+# Load example data
 dataPath <- file.path(system.file(package = "RidgeR"), "extdata/")
 expr.diff <- read.table(paste0(dataPath, "Ly86-Fc_vs_Vehicle_logFC.txt"))
 
-# infer activity; ~2 mins
-res.old <- SecAct.inference.gsl.old(expr.diff) 
-head(res.old$zscore)
+# ---- Compare execution time ----
+t_old <- system.time({res.old <- SecAct.inference.gsl.old(expr.diff)})
+t_new <- system.time({res.new <- SecAct.inference.gsl.new(expr.diff)})
+print(t_old); print(t_new)
 
-res.new <- SecAct.inference.gsl.new(expr.diff) 
-head(res.new$zscore)
+# ---- Compare output: head of z-scores ----
+print(head(res.old$zscore))
+print(head(res.new$zscore))
+
+# ---- summarize differences ----
+diff <- res.new$zscore - res.old$zscore
+print(summary(diff))
+
+# ---- correlation ----
+corr <- cor(res.new$zscore, res.old$zscore)
+print(corr)
 ```
