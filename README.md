@@ -46,8 +46,6 @@ print(corr)
 
 ## Benchmark Results
 
-## Benchmark Results
-
 | Threads | Samples | Old (user/sys/elapsed) | New (user/sys/elapsed) |
 |---------|----------|--------------------------|---------------------------|
 | 4  | 1      | 27.63 / 0.27 / 27.99 | 14.63 / 0.06 / 14.72 |
