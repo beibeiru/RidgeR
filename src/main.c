@@ -8,35 +8,29 @@
 #include <time.h>   // for seed
 #include <math.h>   // for sqrt, fabs
 
-// Tuning parameter: Number of permutations to process in one matrix multiplication
-// 128 is usually a sweet spot for cache efficiency.
-#define BLOCK_SIZE 128 
+// --- MEMORY SAFETY LIMITS ---
+// We limit the buffer width to ensure we never exhaust RAM.
+// 2048 columns * 20,000 rows * 8 bytes ~= 320 MB per thread.
+// This is safe even for 32+ cores on standard servers.
+#define MAX_BUFFER_COLS 2048 
 
 /* =========================================================
    HELPER FUNCTIONS
    ========================================================= */
 
-// Wrapper helper: Maps R vectors to GSL matrix structs
 gsl_matrix *RVectorObject_to_gsl_matrix(double *vec, size_t nr, size_t nc)
 {
-  gsl_block *b;
-  gsl_matrix *r;
-
-  b = (gsl_block*)malloc(sizeof(gsl_block));
-  r = (gsl_matrix*)malloc(sizeof(gsl_matrix));
-
+  gsl_block *b = (gsl_block*)malloc(sizeof(gsl_block));
+  gsl_matrix *r = (gsl_matrix*)malloc(sizeof(gsl_matrix));
   r->size1 = nr;
   r->tda = r->size2 = nc;
-  r->owner = 1; // Mark as owner of the struct (but not the data)
-
+  r->owner = 1; 
   b->data = r->data = vec;
   r->block = b;
   b->size = r->size1 * r->size2;
-
   return r;
 }
 
-// Custom free helper for the wrapper
 void gsl_matrix_partial_free(gsl_matrix *x)
 {
   if(x) {
@@ -45,8 +39,6 @@ void gsl_matrix_partial_free(gsl_matrix *x)
   }
 }
 
-// Legacy Shuffle: Used by Old Version AND Fast Version (for pre-calculation)
-// to ensure results are identical.
 void shuffle(int array[], const int n)
 {
   int i, j;
@@ -60,7 +52,7 @@ void shuffle(int array[], const int n)
 }
 
 /* =========================================================
-   OLD VERSION (Legacy, Slow, Single Thread)
+   OLD VERSION
    ========================================================= */
 void ridgeReg(
   double *X_vec, double *Y_vec,
@@ -88,21 +80,13 @@ void ridgeReg(
   aver = gsl_matrix_alloc(p, m);
   array_index = (int*)malloc(n*sizeof(int));
 
-  // I = (X'X + lambda*I)
   gsl_matrix_set_identity(I);
   gsl_blas_dsyrk(CblasLower, CblasTrans, 1.0, X, lambda, I);
-
-  // I = (X'X + lambda*I)^-1
   gsl_linalg_cholesky_decomp(I);
   gsl_linalg_cholesky_invert(I);
-
-  // T = (X'X + lambda*I)^-1 * X'
   gsl_blas_dgemm(CblasNoTrans, CblasTrans, 1.0, I, X, 0.0, T);
-
-  // beta = T * Y
   gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, Y, 0.0, beta);
 
-  // Permutation
   srand(0);
   for(i=0;i<n;i++) array_index[i] = i;
 
@@ -161,7 +145,7 @@ void ridgeReg(
 }
 
 /* =========================================================
-   NEW VERSION (Fast, OpenMP, Batched + Deterministic RNG)
+   NEW VERSION (Double Tiling: Robust for m=1 to m=1,000,000)
    ========================================================= */
 void ridgeRegFast(
   double *X_vec, double *Y_vec,
@@ -198,99 +182,121 @@ void ridgeRegFast(
   // 2. Real Beta
   gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, Y, 0.0, beta);
 
-  // 3. Pre-calculate Permutations (Deterministic & Identical to Old)
-  // We allocate a table to store all permutation indices. 
-  // We fill this sequentially using the EXACT logic as the Old function.
+  // 3. Pre-calculate Permutations (Deterministic)
   int *perm_table = (int*)malloc((size_t)nrand * n * sizeof(int));
   int *temp_idx = (int*)malloc(n * sizeof(int));
   
-  // Initialize to 0..n-1
   int k;
   for(k=0; k<n; k++) temp_idx[k] = k;
 
-  // Reset Seed to match the Old function
   srand(0);
 
-  // Generate shuffled indices
   for(int i_rand = 0; i_rand < nrand; i_rand++) {
     shuffle(temp_idx, n);
-    // Store in the table
     memcpy(&perm_table[i_rand * n], temp_idx, n * sizeof(int));
   }
   free(temp_idx);
 
   // 4. Batched Parallel Execution
+  // We determine Strip Size and Batch Size to ensure we never exceed MAX_BUFFER_COLS
+  
+  // Decide how many columns of Y to process at once (Strip Size)
+  // If m is huge, we restrict this to allow room for permutation stacking.
+  // We aim to process at least 8 permutations at once for BLAS efficiency.
+  int strip_size = m;
+  int min_perms = 8;
+  
+  if (strip_size * min_perms > MAX_BUFFER_COLS) {
+    strip_size = MAX_BUFFER_COLS / min_perms;
+  }
+  if (strip_size < 1) strip_size = 1;
+
+  // Now determine how many permutations fit in the remaining space
+  int batch_size = MAX_BUFFER_COLS / strip_size;
+  if (batch_size < 1) batch_size = 1;
+
   gsl_matrix_set_zero(pvalue);
   gsl_matrix_set_zero(aver_sq);
 
   #pragma omp parallel
   {
-    // Thread-local accumulators
+    // Thread-local output accumulators (Full Size)
     gsl_matrix *pvalue_priv = gsl_matrix_calloc(p, m);
     gsl_matrix *aver_priv = gsl_matrix_calloc(p, m);
     gsl_matrix *aver_sq_priv = gsl_matrix_calloc(p, m);
     
-    // Batch Buffers:
-    // Y_block stacks 'BLOCK_SIZE' number of Y matrices horizontally.
-    gsl_matrix *Y_block = gsl_matrix_alloc(n, m * BLOCK_SIZE);
+    // Safety Buffers (Fixed Max Size)
+    // We allocate these based on MAX_BUFFER_COLS, not m.
+    gsl_matrix *Y_block = gsl_matrix_alloc(n, strip_size * batch_size);
+    gsl_matrix *Beta_block = gsl_matrix_alloc(p, strip_size * batch_size);
     
-    // Beta_block stores the result of T * Y_block
-    gsl_matrix *Beta_block = gsl_matrix_alloc(p, m * BLOCK_SIZE);
-    
-    int b_start;
-    
-    // Iterate through batches in parallel
+    // OUTER LOOP: Tile over Samples (Columns of Y)
+    // This handles huge m by breaking it into chunks.
+    int c_start;
     #pragma omp for schedule(dynamic)
-    for(b_start = 0; b_start < nrand; b_start += BLOCK_SIZE)
+    for(c_start = 0; c_start < m; c_start += strip_size)
     {
-      // Calculate how many permutations are in this batch (handle end of loop)
-      int current_batch_sz = (b_start + BLOCK_SIZE > nrand) ? (nrand - b_start) : BLOCK_SIZE;
-      
-      // Step A: Construct Y_block using Pre-calculated Permutations
-      int i_perm, row;
-      for(i_perm = 0; i_perm < current_batch_sz; i_perm++) {
-        
-        // Find the specific permutation indices for this iteration
-        int global_perm_id = b_start + i_perm;
-        int *current_perm_idx = &perm_table[global_perm_id * n];
-
-        // Copy permuted Y rows into the block matrix
-        for(row = 0; row < n; row++) {
-           memcpy(Y_block->data + (row * Y_block->tda) + (i_perm * m),
-                  Y->data + (current_perm_idx[row] * Y->tda),
-                  m * sizeof(double));
-        }
-      }
-
-      // Step B: Batched Matrix Multiplication (High Performance)
-      // View into the valid part of the buffers
-      gsl_matrix_view Y_sub = gsl_matrix_submatrix(Y_block, 0, 0, n, m * current_batch_sz);
-      gsl_matrix_view B_sub = gsl_matrix_submatrix(Beta_block, 0, 0, p, m * current_batch_sz);
-      
-      // Beta_block = T * Y_block
-      gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, &Y_sub.matrix, 0.0, &B_sub.matrix);
-
-      // Step C: Accumulate Statistics
-      int r, c;
-      for(i_perm = 0; i_perm < current_batch_sz; i_perm++) {
-        for(r = 0; r < p; r++) {
-          for(c = 0; c < m; c++) {
-             // Access randomized beta
-             double b_rnd = gsl_matrix_get(&B_sub.matrix, r, (i_perm * m) + c);
-             // Access observed beta
-             double b_obs = beta->data[r * m + c];
-
-             if(fabs(b_rnd) >= fabs(b_obs)) {
-                pvalue_priv->data[r * m + c] += 1.0;
+       int current_strip_w = (c_start + strip_size > m) ? (m - c_start) : strip_size;
+       
+       // INNER LOOP: Tile over Permutations
+       // This handles nrand using efficient batches
+       int b_start;
+       for(b_start = 0; b_start < nrand; b_start += batch_size) 
+       {
+           int current_batch_sz = (b_start + batch_size > nrand) ? (nrand - b_start) : batch_size;
+           
+           // Step A: Fill Y_block
+           // We stack 'current_batch_sz' copies of the current Y strip side-by-side
+           int i_perm, row, col;
+           
+           for(i_perm = 0; i_perm < current_batch_sz; i_perm++) {
+             int global_perm_id = b_start + i_perm;
+             int *current_perm_idx = &perm_table[global_perm_id * n];
+             
+             // Copy logic
+             // Source: Y (starts at column c_start, width current_strip_w)
+             // Dest: Y_block (starts at column i_perm * current_strip_w)
+             for(row = 0; row < n; row++) {
+                // We copy a row segment (width = current_strip_w) via memcpy
+                // But we must account for shuffling. 
+                // The source ROW is permuted. The source COLUMNS are c_start to c_start + w.
+                memcpy(Y_block->data + (row * Y_block->tda) + (i_perm * current_strip_w),
+                       Y->data + (current_perm_idx[row] * Y->tda) + c_start,
+                       current_strip_w * sizeof(double));
              }
-             aver_priv->data[r * m + c] += b_rnd;
-             aver_sq_priv->data[r * m + c] += (b_rnd * b_rnd);
-          }
-        }
-      }
+           }
+           
+           // Step B: Batched Matrix Multiply
+           int total_block_width = current_batch_sz * current_strip_w;
+           gsl_matrix_view Y_sub = gsl_matrix_submatrix(Y_block, 0, 0, n, total_block_width);
+           gsl_matrix_view B_sub = gsl_matrix_submatrix(Beta_block, 0, 0, p, total_block_width);
+           
+           gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, &Y_sub.matrix, 0.0, &B_sub.matrix);
+           
+           // Step C: Accumulate
+           int r, c_local;
+           for(i_perm = 0; i_perm < current_batch_sz; i_perm++) {
+             for(r = 0; r < p; r++) {
+               for(c_local = 0; c_local < current_strip_w; c_local++) {
+                  
+                  // Map local coordinates back to Global Y coordinates
+                  int global_c = c_start + c_local;
+                  
+                  double b_rnd = gsl_matrix_get(&B_sub.matrix, r, (i_perm * current_strip_w) + c_local);
+                  double b_obs = beta->data[r * m + global_c];
+                  
+                  // Update stats at global coordinate
+                  if(fabs(b_rnd) >= fabs(b_obs)) {
+                     pvalue_priv->data[r * m + global_c] += 1.0;
+                  }
+                  aver_priv->data[r * m + global_c] += b_rnd;
+                  aver_sq_priv->data[r * m + global_c] += (b_rnd * b_rnd);
+               }
+             }
+           }
+       }
     }
 
-    // Reduce thread-local results to global matrices
     #pragma omp critical
     {
       gsl_matrix_add(pvalue, pvalue_priv);
@@ -298,7 +304,6 @@ void ridgeRegFast(
       gsl_matrix_add(aver_sq, aver_sq_priv);
     }
 
-    // Free thread-local memory
     gsl_matrix_free(Y_block);
     gsl_matrix_free(Beta_block);
     gsl_matrix_free(pvalue_priv);
@@ -306,10 +311,9 @@ void ridgeRegFast(
     gsl_matrix_free(aver_sq_priv);
   }
 
-  // Done with permutation table
   free(perm_table);
 
-  // 5. Final Statistics Calculation (Matches Old Code Logic)
+  // 5. Final Stats
   double inv_nrand = 1.0 / nrand;
 
   gsl_matrix_add_constant(pvalue, 1.0);
