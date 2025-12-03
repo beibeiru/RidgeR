@@ -39,10 +39,10 @@ dataPath <- file.path(system.file(package = "RidgeR"), "extdata/")
 expr.diff <- read.table(paste0(dataPath, "Ly86-Fc_vs_Vehicle_logFC.txt"))
 
 # infer activity; ~2 mins
-res.old <- SecAct.inference.legacy(expr.diff) 
+res.old <- SecAct.inference.gsl.old(expr.diff) 
 head(res.old$zscore)
 
-res.new <- SecAct.inference(expr.diff) 
+res.new <- SecAct.inference.gsl.new(expr.diff) 
 head(res.new$zscore)
 
 ```
