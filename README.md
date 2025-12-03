@@ -1,4 +1,4 @@
-<img width="232" height="17" alt="image" src="https://github.com/user-attachments/assets/20ad77d8-8f2e-43ff-9eee-4da298b9521f" /><img width="232" height="17" alt="image" src="https://github.com/user-attachments/assets/4fb88767-a4e5-487a-855b-83b055953aff" />
+
 <!-- README.md is generated from README.Rmd. Please edit that file -->
 
 # SecAct: Secreted Protein Activity Inference
