@@ -1,4 +1,4 @@
 
-export(SecAct.inference.gsl.new)
-export(SecAct.inference.gsl.old)
+export(SecAct.inference)
+export(SecAct.inference.legacy)
 useDynLib(RidgeR, .registration=TRUE)
