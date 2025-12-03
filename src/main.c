@@ -11,7 +11,6 @@
 // --- TUNING ---
 // Number of samples (columns) a thread processes at one time.
 // 64 is small enough to fit in cache, large enough for BLAS efficiency.
-// This keeps memory usage CONSTANT per thread, regardless of m.
 #define SAMPLE_STRIP_SIZE 64 
 
 // Batch of permutations. 
@@ -55,7 +54,7 @@ void shuffle(int array[], const int n)
 }
 
 /* =========================================================
-   OLD VERSION
+   OLD VERSION (Reference)
    ========================================================= */
 void ridgeReg(
   double *X_vec, double *Y_vec,
@@ -172,8 +171,8 @@ void ridgeRegFast(
   gsl_matrix *Y = RVectorObject_to_gsl_matrix(Y_vec, n, m);
   gsl_matrix *beta = RVectorObject_to_gsl_matrix(beta_vec, p, m);
   
-  // NOTE: For huge m, we do NOT allocate full accumulators in GSL
-  // We use the raw double pointers passed from R directly (se_vec, etc.)
+  // NOTE: We use raw R pointers (se_vec, zscore_vec) directly for accumulation.
+  // We do NOT allocate a separate 'aver' matrix to save memory.
   
   gsl_matrix *I_mat = gsl_matrix_alloc(p, p);
   gsl_matrix *T = gsl_matrix_alloc(p, n);
@@ -188,7 +187,7 @@ void ridgeRegFast(
   // 2. Real Beta
   gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, Y, 0.0, beta);
 
-  // 3. Pre-calculate Permutations
+  // 3. Pre-calculate Permutations (Deterministic)
   int *perm_table = (int*)malloc((size_t)nrand * n * sizeof(int));
   int *temp_idx = (int*)malloc(n * sizeof(int));
   
@@ -204,7 +203,6 @@ void ridgeRegFast(
   free(temp_idx);
 
   // Initialize outputs to 0
-  // Note: Using parallel loop for initialization as size could be huge (1M * 1000)
   size_t total_elements = p * m;
   #pragma omp parallel for
   for(size_t i=0; i<total_elements; i++) {
@@ -212,7 +210,7 @@ void ridgeRegFast(
     se_vec[i] = 0.0;     // aver_sq
     zscore_vec[i] = 0.0; // aver
   }
-  // Reuse pointers for clarity: zscore_vec is used for 'aver' temporarily
+  // Reuse pointers: zscore_vec is used for 'aver' temporarily
 
   // 4. Parallelize over SAMPLES (Columns)
   // Each thread takes a disjoint set of columns. No memory conflicts.
@@ -244,16 +242,8 @@ void ridgeRegFast(
            int *current_perm_idx = &perm_table[(size_t)(b_start + i_perm) * n];
            
            for(row = 0; row < n; row++) {
-             // Copy logic: Get permuted ROW from Y, copy 'current_cols' elements
-             // Y->data is row-major? No, R matrices are usually COL-major, 
-             // but our wrapper says size1=n, size2=m. 
-             // IMPORTANT: R stores matrices as Column-Major.
-             // But we passed t(X) and t(Y) from R, so in C they look Row-Major.
-             // So Y->data is linear. row 'r' starts at Y->data + r*m.
-             
              // Offset in Y_block: (row * tda) + (i_perm * current_cols)
              // Offset in Y:       (permuted_row * tda) + col_start
-             
              memcpy(Y_block->data + (row * Y_block->tda) + (i_perm * current_cols),
                     Y->data + ((size_t)current_perm_idx[row] * Y->tda) + col_start,
                     current_cols * sizeof(double));
@@ -325,11 +315,9 @@ void ridgeRegFast(
 
   gsl_matrix_free(I_mat);
   gsl_matrix_free(T);
-  // Note: 'aver' was not allocated, we used zscore_vec
-  // gsl_matrix_free(aver); 
+  // 'aver' was intentionally not used to save memory
 
   gsl_matrix_partial_free(X);
   gsl_matrix_partial_free(Y);
   gsl_matrix_partial_free(beta);
-  // gsl_matrix_partial_free for se/zscore/pvalue is not needed as we didn't use structs for accumulators
 }
