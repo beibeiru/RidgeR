@@ -30,8 +30,8 @@ dataPath <- file.path(system.file(package = "RidgeR"), "extdata/")
 expr.diff <- read.table(paste0(dataPath, "Ly86-Fc_vs_Vehicle_logFC.txt"))
 
 # ---- Compare execution time ----
-t_old <- system.time({res.old <- SecAct.inference.gsl.old(expr.diff)})
-t_new <- system.time({res.new <- SecAct.inference.gsl.new(expr.diff)})
+t_old <- system.time({res.old <- SecAct.inference.legacy(expr.diff)})
+t_new <- system.time({res.new <- SecAct.inference(expr.diff)})
 print(t_old); print(t_new)
 
 # ---- Compare output: head of z-scores ----
