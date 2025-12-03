@@ -15,7 +15,7 @@
 #' @rdname SecAct.inference.gsl.new
 #' @export
 #'
-SecAct.inference.gsl.new <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=1000, coreNo=4)
+SecAct.inference.gsl.new <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=1000)
 {
   if(SigMat=="SecAct")
   {
@@ -47,8 +47,7 @@ SecAct.inference.gsl.new <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=100
             beta=double(p*m),
             se=double(p*m),
             zscore=double(p*m),
-            pvalue=double(p*m),
-            as.integer(coreNo)
+            pvalue=double(p*m)
   )
 
   beta <- matrix(res$beta,byrow=T,ncol=m,dimnames=list(colnames(X),colnames(Y)))
