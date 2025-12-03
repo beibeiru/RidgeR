@@ -2,10 +2,8 @@ Package: RidgeR
 Type: Package
 Title: Ridge Significance Testing Using Secreted Protein Signatures
 Version: 0.0.0.9002
-Authors@R: c(
-    person("Beibei", "Ru", email = "beibei.ru@nih.gov", role = c("aut", "cre")),
-    person("Seongyong", "Park", email = "seongyong.park@nih.gov", role = c("aut", "cre"))
-)
+Authors@R: c(person("Beibei", "Ru", email = "beibei.ru@nih.gov", role = c("aut","cre")),
+             person("Seongyong", "Park", email = "seongyong.park@nih.gov", role = c("aut","cre")))
 Description: Ridge significance testing in R using secreted protein signatures.
 License: MIT
 Encoding: UTF-8
