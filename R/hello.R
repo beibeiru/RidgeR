@@ -19,7 +19,7 @@ SecAct.inference.gsl.new <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=100
 {
   if(SigMat=="SecAct")
   {
-    Xfile<- file.path(system.file(package = "SecAct"), "extdata/SecAct.tsv.gz")
+    Xfile<- file.path(system.file(package = "RidgeR"), "extdata/SecAct.tsv.gz")
     X <- read.table(Xfile,sep="\t",check.names=F)
   }else{
     X <- read.table(SigMat,sep="\t",check.names=F)
@@ -82,7 +82,7 @@ SecAct.inference.gsl.old <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=100
 {
   if(SigMat=="SecAct")
   {
-    Xfile<- file.path(system.file(package = "SecAct"), "extdata/SecAct.tsv.gz")
+    Xfile<- file.path(system.file(package = "RidgeR"), "extdata/SecAct.tsv.gz")
     X <- read.table(Xfile,sep="\t",check.names=F)
   }else{
     X <- read.table(SigMat,sep="\t",check.names=F)
