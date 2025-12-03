@@ -5,7 +5,7 @@
 #' @param lambda Penalty factor.
 #' @param nrand Number of randomizations.
 #' @export
-SecAct.inference.gsl.old <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=1000)
+SecAct.inference.legacy <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=1000)
 {
   if(SigMat=="SecAct") {
     Xfile<- file.path(system.file(package = "SecAct"), "extdata/SecAct.tsv.gz")
@@ -42,7 +42,7 @@ SecAct.inference.gsl.old <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=100
 #' @param nrand Number of randomizations.
 #' @param ncores Number of cores (default: all available).
 #' @export
-SecAct.inference.gsl.new <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=1000, ncores=NULL)
+SecAct.inference <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=1000, ncores=NULL)
 {
   if(SigMat=="SecAct") {
     Xfile<- file.path(system.file(package = "SecAct"), "extdata/SecAct.tsv.gz")
