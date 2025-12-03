@@ -36,7 +36,7 @@ SecAct.inference.gsl.new <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=100
   p <- ncol(X)
   m <- ncol(Y)
 
-  res <- .C("ridge_gsl_reg",
+  res <- .C("ridgeRegFast",
             X=as.double(t(X)),
             Y=as.double(t(Y)),
             as.integer(n),
