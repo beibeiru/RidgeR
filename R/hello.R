@@ -48,7 +48,7 @@ SecAct.inference.gsl.new <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=100
             se=double(p*m),
             zscore=double(p*m),
             pvalue=double(p*m),
-            df_out = double(1)
+            df_out = double(5)
   )
 
   beta <- matrix(res$beta,byrow=T,ncol=m,dimnames=list(colnames(X),colnames(Y)))
