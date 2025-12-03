@@ -22,6 +22,9 @@ The package has been installed successfully on Operating Systems:
 ``` r
 library(RidgeR)
 
+# Check NumThreads
+RcppParallel::defaultNumThreads()
+
 # Load example data
 dataPath <- file.path(system.file(package = "RidgeR"), "extdata/")
 expr.diff <- read.table(paste0(dataPath, "Ly86-Fc_vs_Vehicle_logFC.txt"))
