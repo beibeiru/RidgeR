@@ -1,4 +1,4 @@
-
+<img width="232" height="17" alt="image" src="https://github.com/user-attachments/assets/20ad77d8-8f2e-43ff-9eee-4da298b9521f" /><img width="232" height="17" alt="image" src="https://github.com/user-attachments/assets/4fb88767-a4e5-487a-855b-83b055953aff" />
 <!-- README.md is generated from README.Rmd. Please edit that file -->
 
 # SecAct: Secreted Protein Activity Inference
@@ -21,6 +21,9 @@ The package has been installed successfully on Operating Systems:
 
 ``` r
 library(RidgeR)
+
+# Check NumThreads
+RcppParallel::defaultNumThreads()
 
 # Load example data
 dataPath <- file.path(system.file(package = "RidgeR"), "extdata/")
@@ -57,11 +60,11 @@ print(corr)
 | 8  | 10     | 31.34 / 0.15 / 31.55 | 19.76 / 0.16 / 19.97 |
 | 8  | 100    | 64.74 / 0.12 / 65.03 | 49.35 / 0.19 / 37.47 |
 | 8  | 1000   | 364.18 / 0.23 / 365.21 | 703.89 / 2.05 / 105.97 |
-| 8  | 10000  | — | 6948.65 / 115.15 / 929.69 | 
+| 8  | 10000  | 3417 / 16.72 / 3441.46 | 6948.65 / 115.15 / 929.69 | 
 | 12 | 1      | 41.01 / 0.48 / 41.64 | 20.40 / 0.12 / 20.56 |
 | 12 | 10     | 39.21 / 0.16 / 39.47 | 25.72 / 0.12 / 25.90 |
 | 12 | 100    | 74.97 / 0.16 / 75.40 | 55.43 / 0.24 / 43.65 |
 | 12 | 1000   | 388.42 / 0.22 / 389.43 | 690.07 / 2.57 / 86.01 |
-| 12 | 10000  | — | 7002.97 / 99.05 / 629.99 |
+| 12 | 10000  | 3330.16 / 1.65 / 3340.45 | 7002.97 / 99.05 / 629.99 |
 
 
