@@ -15,6 +15,7 @@ The package has been installed successfully on Operating Systems:
 
 - Red Hat Enterprise Linux 8.10 (Ootpa)
 - macOS Sequoia 15.3.1
+- Windows 10
 
 ## Example
 
