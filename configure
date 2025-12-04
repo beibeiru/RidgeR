@@ -2,116 +2,87 @@
 
 # 1. GSL DETECTION
 echo "Checking for GSL..."
+
 if ! command -v gsl-config >/dev/null 2>&1; then
     echo "ERROR: GSL is not installed or gsl-config is not in PATH."
     exit 1
 fi
+
 GSL_CFLAGS=$(gsl-config --cflags)
 GSL_LIBS=$(gsl-config --libs)
 
-# 2. COMPILER & OPENMP DETECTION
+echo "GSL found!"
+echo "  GSL_CFLAGS: $GSL_CFLAGS"
+echo "  GSL_LIBS:   $GSL_LIBS"
+
+# 2. OPENMP DETECTION
 echo "Checking for OpenMP support..."
 
 OMP_CFLAGS=""
 OMP_LIBS=""
-OVERRIDE_LDFLAGS=""
 OS=$(uname -s)
-
-# Get the compiler R is configured to use
-R_CC=$(R CMD config CC)
 
 if [ "$OS" = "Darwin" ]; then
     # --- macOS Specific Logic ---
+    # Apple Clang does not support -fopenmp directly. 
+    # It requires -Xpreprocessor -fopenmp and explicit linking to libomp.
     
-    # Case A: Homebrew LLVM Clang (The one causing your issues)
-    if echo "$R_CC" | grep -q "opt/homebrew/opt/llvm"; then
-        echo "  Detected Homebrew LLVM Compiler."
-        LLVM_LIB="/opt/homebrew/opt/llvm/lib"
+    if [ -d "/opt/homebrew/opt/libomp" ]; then
+        # Apple Silicon (M1/M2/M3) Homebrew
+        echo "  Detected macOS (Apple Silicon) with Homebrew libomp."
+        OMP_CFLAGS="-Xpreprocessor -fopenmp -I/opt/homebrew/opt/libomp/include"
+        OMP_LIBS="-L/opt/homebrew/opt/libomp/lib -lomp"
         
-        if [ -d "$LLVM_LIB" ]; then
-            OMP_CFLAGS="-fopenmp -I/opt/homebrew/opt/llvm/include"
-            # Link to LLVM's specific libomp
-            OMP_LIBS="$LLVM_LIB/libomp.dylib -Wl,-rpath,$LLVM_LIB"
-            # Force linker to look here first
-            OVERRIDE_LDFLAGS="-L$LLVM_LIB"
-        fi
+    elif [ -d "/usr/local/opt/libomp" ]; then
+        # Intel Mac Homebrew
+        echo "  Detected macOS (Intel) with Homebrew libomp."
+        OMP_CFLAGS="-Xpreprocessor -fopenmp -I/usr/local/opt/libomp/include"
+        OMP_LIBS="-L/usr/local/opt/libomp/lib -lomp"
         
-    # Case B: MacPorts LLVM
-    elif echo "$R_CC" | grep -q "opt/local/bin"; then
-        echo "  Detected MacPorts LLVM Compiler."
-        OMP_CFLAGS="-fopenmp"
-        OMP_LIBS="-lomp"
-        
-    # Case C: Standard Apple Clang (Xcode) using Homebrew libomp
     else
-        echo "  Detected Standard Apple Clang."
-        
-        if [ -f "/opt/homebrew/opt/libomp/lib/libomp.dylib" ]; then
-            # Apple Silicon
-            OMP_CFLAGS="-Xpreprocessor -fopenmp -I/opt/homebrew/opt/libomp/include"
-            OMP_LIBS="/opt/homebrew/opt/libomp/lib/libomp.dylib -Wl,-rpath,/opt/homebrew/opt/libomp/lib"
-            OVERRIDE_LDFLAGS="-L/opt/homebrew/opt/libomp/lib"
-            
-        elif [ -f "/usr/local/opt/libomp/lib/libomp.dylib" ]; then
-            # Intel Mac
-            OMP_CFLAGS="-Xpreprocessor -fopenmp -I/usr/local/opt/libomp/include"
-            OMP_LIBS="/usr/local/opt/libomp/lib/libomp.dylib -Wl,-rpath,/usr/local/opt/libomp/lib"
-            OVERRIDE_LDFLAGS="-L/usr/local/opt/libomp/lib"
-        else
-             echo "  Homebrew libomp not found. Trying R defaults..."
-             OMP_CFLAGS=$(R CMD config SHLIB_OPENMP_CFLAGS 2>/dev/null)
-             OMP_LIBS=$(R CMD config SHLIB_OPENMP_CFLAGS 2>/dev/null)
-        fi
-    fi
-    
-    # WARN USER: Check for dangerous ~/.R/Makevars
-    if [ -f "$HOME/.R/Makevars" ]; then
-        if grep -q "usr/local.*omp\|lomp" "$HOME/.R/Makevars" 2>/dev/null; then
-            echo "  -------------------------------------------------------------------"
-            echo "  WARNING: Potential conflict detected in ~/.R/Makevars"
-            echo "  You seem to be forcing OpenMP flags globally."
-            echo "  If installation fails, rename that file temporarily:"
-            echo "  mv ~/.R/Makevars ~/.R/Makevars.bak"
-            echo "  -------------------------------------------------------------------"
-        fi
+        # Fallback: Try R's default config (might fail on Clang if not configured in ~/.R/Makevars)
+        echo "  Homebrew libomp not found in standard locations. Trying R defaults..."
+        OMP_CFLAGS=$(R CMD config SHLIB_OPENMP_CFLAGS 2>/dev/null)
+        # On Mac, CFLAGS usually isn't enough for linking, but we try.
+        OMP_LIBS="" 
     fi
 
 else
-    # --- Linux Logic ---
+    # --- Linux / Standard Logic ---
+    # GCC usually handles OpenMP easily via R CMD config
     OMP_CFLAGS=$(R CMD config SHLIB_OPENMP_CFLAGS 2>/dev/null)
-    OMP_LIBS=$(R CMD config SHLIB_OPENMP_CFLAGS 2>/dev/null)
+    # For GCC, -fopenmp in CFLAGS is often sufficient for linking too, 
+    # but strictly speaking, it should be passed to linker. 
+    # R usually handles this environment.
+    OMP_LIBS=""
 fi
 
-# Clean up variables
-case "$OMP_CFLAGS" in *ERROR*) OMP_CFLAGS="";; esac
-case "$OMP_LIBS" in *ERROR*) OMP_LIBS="";; esac
+# Clean up any potential error messages captured in variables
+case "$OMP_CFLAGS" in
+    *ERROR*) OMP_CFLAGS="";;
+esac
 
-# 3. WRITE MAKEVARS
-mkdir -p src
-
-cat > src/Makevars <<EOF
-## Automatically generated by configure
-PKG_CFLAGS = $OMP_CFLAGS $GSL_CFLAGS
-PKG_LIBS = $OMP_LIBS $GSL_LIBS
-EOF
-
-# AGGRESSIVE OVERRIDE:
-# If we detected a specific library path, we inject it into LDFLAGS
-# This overrides the user's ~/.R/Makevars LDFLAGS setting for this package build.
-if [ -n "$OVERRIDE_LDFLAGS" ]; then
-    cat >> src/Makevars <<EOF
-
-# Override to prioritize the correct OpenMP library path
-LDFLAGS = $OVERRIDE_LDFLAGS
-EOF
-fi
-
+# 3. REPORT AND WRITE
 if [ -n "$OMP_CFLAGS" ]; then
     echo "OpenMP enabled."
     echo "  OMP_CFLAGS: $OMP_CFLAGS"
     echo "  OMP_LIBS:   $OMP_LIBS"
 else
     echo "WARNING: OpenMP not found. Building single-threaded version."
+    # On Mac, print a helpful hint
+    if [ "$OS" = "Darwin" ]; then
+        echo "  (Hint: On macOS, run 'brew install libomp' if you haven't already)"
+    fi
 fi
+
+# Create src directory if it doesn't exist (standard safety)
+mkdir -p src
+
+# Write Makevars
+cat > src/Makevars <<EOF
+## Automatically generated by configure
+PKG_CFLAGS = $GSL_CFLAGS $OMP_CFLAGS
+PKG_LIBS = $GSL_LIBS $OMP_LIBS
+EOF
 
 echo "Configuration complete."
