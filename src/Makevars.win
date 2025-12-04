@@ -1,0 +1,13 @@
+## src/Makevars.win
+
+## 1. OpenMP Flags
+## Rtools GCC supports OpenMP natively.
+PKG_CFLAGS = -fopenmp
+PKG_LIBS = -fopenmp
+
+## 2. GSL Flags
+## Rtools42/43/44/45 handles libraries via pkg-config automatically 
+## if 'gsl' is listed in SystemRequirements, or we can force it.
+## Standard approach for Rtools is linking directly.
+
+PKG_LIBS += -lgsl -lgslcblas
