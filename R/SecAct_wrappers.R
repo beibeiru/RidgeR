@@ -58,9 +58,9 @@ SecAct.inference.gsl.new <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=100
   X[is.na(X)] <- 0; Y[is.na(Y)] <- 0
 
   n <- length(olp); p <- ncol(X); m <- ncol(Y)
-  
+
   if(is.null(ncores)) {
-    ncores <- RcppParallel::defaultNumThreads()
+    ncores <- parallel::detectCores(logical = FALSE)
   }
 
   res <- .C("ridgeRegFast",
