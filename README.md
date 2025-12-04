@@ -22,8 +22,8 @@ The package has been installed successfully on Operating Systems:
 library(RidgeR)
 
 # ---- Load example data ----
-dataPath <- file.path(system.file(package = "RidgeR"), "extdata/")
-expr.diff <- read.table(paste0(dataPath, "Ly86-Fc_vs_Vehicle_logFC.txt"))
+dataPath <- file.path(system.file(package = "RidgeR"), "extdata")
+expr.diff <- read.table(paste0(dataPath, "/Ly86-Fc_vs_Vehicle_logFC.txt"))
 
 # ---- Compare execution time ----
 t_old <- system.time({res.old <- SecAct.inference.gsl.old(expr.diff)})
