@@ -23,7 +23,7 @@ R_CC=$(R CMD config CC)
 if [ "$OS" = "Darwin" ]; then
     # --- macOS Specific Logic ---
     
-    # Case A: Homebrew LLVM Clang (The one causing your issues)
+    # Case A: Homebrew LLVM Clang
     if echo "$R_CC" | grep -q "opt/homebrew/opt/llvm"; then
         echo "  Detected Homebrew LLVM Compiler."
         LLVM_LIB="/opt/homebrew/opt/llvm/lib"
@@ -94,17 +94,6 @@ cat > src/Makevars <<EOF
 PKG_CFLAGS = $OMP_CFLAGS $GSL_CFLAGS
 PKG_LIBS = $OMP_LIBS $GSL_LIBS
 EOF
-
-# AGGRESSIVE OVERRIDE:
-# If we detected a specific library path, we inject it into LDFLAGS
-# This overrides the user's ~/.R/Makevars LDFLAGS setting for this package build.
-if [ -n "$OVERRIDE_LDFLAGS" ]; then
-    cat >> src/Makevars <<EOF
-
-# Override to prioritize the correct OpenMP library path
-LDFLAGS = $OVERRIDE_LDFLAGS
-EOF
-fi
 
 if [ -n "$OMP_CFLAGS" ]; then
     echo "OpenMP enabled."
