@@ -1,0 +1,18 @@
+#!/bin/sh
+# configure.win
+# This script is executed by R on Windows before compilation.
+
+echo "Configuring for Windows..."
+
+# Check if GSL is available via pkg-config (Standard in Rtools42+)
+if pkg-config --exists gsl; then
+    echo "  GSL found via pkg-config"
+else
+    echo "  WARNING: GSL not found via pkg-config."
+    echo "  Please ensure GSL is installed in Rtools:"
+    echo "  pacman -S mingw-w64-x86_64-gsl"
+fi
+
+# We do not generate Makevars.win dynamically here because
+# src/Makevars.win (created in Step 3) handles the standard Rtools flags.
+exit 0
