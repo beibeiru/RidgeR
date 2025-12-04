@@ -11,61 +11,78 @@ GSL_LIBS=$(gsl-config --libs)
 
 # 2. COMPILER & OPENMP DETECTION
 echo "Checking for OpenMP support..."
+
 OMP_CFLAGS=""
 OMP_LIBS=""
 OVERRIDE_LDFLAGS=""
-
 OS=$(uname -s)
+
+# Get the compiler R is configured to use
 R_CC=$(R CMD config CC)
 
 if [ "$OS" = "Darwin" ]; then
-    # --- macOS Logic ---
+    # --- macOS Specific Logic ---
     
+    # Case A: Homebrew LLVM Clang (The one causing your issues)
     if echo "$R_CC" | grep -q "opt/homebrew/opt/llvm"; then
         echo "  Detected Homebrew LLVM Compiler."
         LLVM_LIB="/opt/homebrew/opt/llvm/lib"
+        
         if [ -d "$LLVM_LIB" ]; then
-            OMP_CFLAGS="-fopenmp"
+            OMP_CFLAGS="-fopenmp -I/opt/homebrew/opt/llvm/include"
+            # Link to LLVM's specific libomp
             OMP_LIBS="$LLVM_LIB/libomp.dylib -Wl,-rpath,$LLVM_LIB"
-            # Override LDFLAGS to prevent conflicts from ~/.R/Makevars
+            # Force linker to look here first
             OVERRIDE_LDFLAGS="-L$LLVM_LIB"
         fi
         
+    # Case B: MacPorts LLVM
     elif echo "$R_CC" | grep -q "opt/local/bin"; then
         echo "  Detected MacPorts LLVM Compiler."
         OMP_CFLAGS="-fopenmp"
         OMP_LIBS="-lomp"
         
+    # Case C: Standard Apple Clang (Xcode) using Homebrew libomp
     else
-        echo "  Detected Apple Clang."
+        echo "  Detected Standard Apple Clang."
+        
         if [ -f "/opt/homebrew/opt/libomp/lib/libomp.dylib" ]; then
+            # Apple Silicon
             OMP_CFLAGS="-Xpreprocessor -fopenmp -I/opt/homebrew/opt/libomp/include"
             OMP_LIBS="/opt/homebrew/opt/libomp/lib/libomp.dylib -Wl,-rpath,/opt/homebrew/opt/libomp/lib"
             OVERRIDE_LDFLAGS="-L/opt/homebrew/opt/libomp/lib"
+            
         elif [ -f "/usr/local/opt/libomp/lib/libomp.dylib" ]; then
+            # Intel Mac
             OMP_CFLAGS="-Xpreprocessor -fopenmp -I/usr/local/opt/libomp/include"
             OMP_LIBS="/usr/local/opt/libomp/lib/libomp.dylib -Wl,-rpath,/usr/local/opt/libomp/lib"
             OVERRIDE_LDFLAGS="-L/usr/local/opt/libomp/lib"
+        else
+             echo "  Homebrew libomp not found. Trying R defaults..."
+             OMP_CFLAGS=$(R CMD config SHLIB_OPENMP_CFLAGS 2>/dev/null)
+             OMP_LIBS=$(R CMD config SHLIB_OPENMP_CFLAGS 2>/dev/null)
         fi
     fi
     
-    # CONFLICT DETECTION: Warn user if ~/.R/Makevars might cause issues
+    # WARN USER: Check for dangerous ~/.R/Makevars
     if [ -f "$HOME/.R/Makevars" ]; then
         if grep -q "usr/local.*omp\|lomp" "$HOME/.R/Makevars" 2>/dev/null; then
-            echo ""
-            echo "  *** WARNING ***"
-            echo "  Your ~/.R/Makevars contains OpenMP flags that may conflict."
-            echo "  If installation fails, try: mv ~/.R/Makevars ~/.R/Makevars.bak"
-            echo ""
+            echo "  -------------------------------------------------------------------"
+            echo "  WARNING: Potential conflict detected in ~/.R/Makevars"
+            echo "  You seem to be forcing OpenMP flags globally."
+            echo "  If installation fails, rename that file temporarily:"
+            echo "  mv ~/.R/Makevars ~/.R/Makevars.bak"
+            echo "  -------------------------------------------------------------------"
         fi
     fi
+
 else
     # --- Linux Logic ---
     OMP_CFLAGS=$(R CMD config SHLIB_OPENMP_CFLAGS 2>/dev/null)
     OMP_LIBS=$(R CMD config SHLIB_OPENMP_CFLAGS 2>/dev/null)
 fi
 
-# Clean up
+# Clean up variables
 case "$OMP_CFLAGS" in *ERROR*) OMP_CFLAGS="";; esac
 case "$OMP_LIBS" in *ERROR*) OMP_LIBS="";; esac
 
@@ -78,11 +95,13 @@ PKG_CFLAGS = $OMP_CFLAGS $GSL_CFLAGS
 PKG_LIBS = $OMP_LIBS $GSL_LIBS
 EOF
 
-# If we need to override LDFLAGS to prevent conflicts
+# AGGRESSIVE OVERRIDE:
+# If we detected a specific library path, we inject it into LDFLAGS
+# This overrides the user's ~/.R/Makevars LDFLAGS setting for this package build.
 if [ -n "$OVERRIDE_LDFLAGS" ]; then
     cat >> src/Makevars <<EOF
 
-# Override to prevent conflicts with user ~/.R/Makevars
+# Override to prioritize the correct OpenMP library path
 LDFLAGS = $OVERRIDE_LDFLAGS
 EOF
 fi
@@ -92,7 +111,7 @@ if [ -n "$OMP_CFLAGS" ]; then
     echo "  OMP_CFLAGS: $OMP_CFLAGS"
     echo "  OMP_LIBS:   $OMP_LIBS"
 else
-    echo "WARNING: OpenMP not found. Package will compile without parallelization."
+    echo "WARNING: OpenMP not found. Building single-threaded version."
 fi
 
 echo "Configuration complete."
