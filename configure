@@ -1,7 +1,10 @@
 #!/bin/sh
 
+# ===========================================================================
 # 1. GSL DETECTION
+# ===========================================================================
 echo "Checking for GSL..."
+<<<<<<< HEAD
 if ! command -v gsl-config >/dev/null 2>&1; then
     echo "ERROR: GSL is not installed or gsl-config is not in PATH."
     echo "Please install GSL first:"
@@ -10,12 +13,35 @@ if ! command -v gsl-config >/dev/null 2>&1; then
     echo "  RedHat/CentOS: sudo yum install gsl-devel"
     echo "  Fedora/RHEL: sudo dnf install gsl-devel"
     echo "  "
+=======
+
+# Define potential locations for gsl-config on macOS/Linux
+GSL_CONFIG_EXEC="gsl-config"
+
+# If not in PATH, look in standard Homebrew/MacPorts locations
+if ! command -v "$GSL_CONFIG_EXEC" >/dev/null 2>&1; then
+    if [ -x "/opt/homebrew/bin/gsl-config" ]; then
+        GSL_CONFIG_EXEC="/opt/homebrew/bin/gsl-config"
+    elif [ -x "/usr/local/bin/gsl-config" ]; then
+        GSL_CONFIG_EXEC="/usr/local/bin/gsl-config"
+    elif [ -x "/opt/local/bin/gsl-config" ]; then
+        GSL_CONFIG_EXEC="/opt/local/bin/gsl-config"
+    fi
+fi
+
+# Final check: Can we execute it?
+if ! "$GSL_CONFIG_EXEC" --version >/dev/null 2>&1; then
+    echo "ERROR: GSL is not installed or gsl-config is not found."
+>>>>>>> a89e95e5195742cb1de774cea83a55218bf08090
     exit 1
 fi
-GSL_CFLAGS=$(gsl-config --cflags)
-GSL_LIBS=$(gsl-config --libs)
 
+GSL_CFLAGS=$("$GSL_CONFIG_EXEC" --cflags)
+GSL_LIBS=$("$GSL_CONFIG_EXEC" --libs)
+
+# ===========================================================================
 # 2. COMPILER & OPENMP DETECTION
+# ===========================================================================
 echo "Checking for OpenMP support..."
 
 OMP_CFLAGS=""
@@ -31,27 +57,29 @@ if [ "$OS" = "Darwin" ]; then
 
     # Case A: Homebrew LLVM Clang
     if echo "$R_CC" | grep -q "opt/homebrew/opt/llvm"; then
-        echo "  Detected Homebrew LLVM Compiler."
         LLVM_LIB="/opt/homebrew/opt/llvm/lib"
+<<<<<<< HEAD
 
+=======
+>>>>>>> a89e95e5195742cb1de774cea83a55218bf08090
         if [ -d "$LLVM_LIB" ]; then
             OMP_CFLAGS="-fopenmp -I/opt/homebrew/opt/llvm/include"
-            # Link to LLVM's specific libomp
             OMP_LIBS="$LLVM_LIB/libomp.dylib -Wl,-rpath,$LLVM_LIB"
-            # Force linker to look here first
             OVERRIDE_LDFLAGS="-L$LLVM_LIB"
         fi
 
     # Case B: MacPorts LLVM
     elif echo "$R_CC" | grep -q "opt/local/bin"; then
-        echo "  Detected MacPorts LLVM Compiler."
         OMP_CFLAGS="-fopenmp"
         OMP_LIBS="-lomp"
 
     # Case C: Standard Apple Clang (Xcode) using Homebrew libomp
     else
+<<<<<<< HEAD
         echo "  Detected Standard Apple Clang."
 
+=======
+>>>>>>> a89e95e5195742cb1de774cea83a55218bf08090
         if [ -f "/opt/homebrew/opt/libomp/lib/libomp.dylib" ]; then
             # Apple Silicon
             OMP_CFLAGS="-Xpreprocessor -fopenmp -I/opt/homebrew/opt/libomp/include"
@@ -64,21 +92,21 @@ if [ "$OS" = "Darwin" ]; then
             OMP_LIBS="/usr/local/opt/libomp/lib/libomp.dylib -Wl,-rpath,/usr/local/opt/libomp/lib"
             OVERRIDE_LDFLAGS="-L/usr/local/opt/libomp/lib"
         else
-             echo "  Homebrew libomp not found. Trying R defaults..."
+             # Fallback
              OMP_CFLAGS=$(R CMD config SHLIB_OPENMP_CFLAGS 2>/dev/null)
              OMP_LIBS=$(R CMD config SHLIB_OPENMP_CFLAGS 2>/dev/null)
         fi
     fi
+<<<<<<< HEAD
 
     # WARN USER: Check for dangerous ~/.R/Makevars
+=======
+    
+    # Check for ~/.R/Makevars conflict
+>>>>>>> a89e95e5195742cb1de774cea83a55218bf08090
     if [ -f "$HOME/.R/Makevars" ]; then
         if grep -q "usr/local.*omp\|lomp" "$HOME/.R/Makevars" 2>/dev/null; then
-            echo "  -------------------------------------------------------------------"
-            echo "  WARNING: Potential conflict detected in ~/.R/Makevars"
-            echo "  You seem to be forcing OpenMP flags globally."
-            echo "  If installation fails, rename that file temporarily:"
-            echo "  mv ~/.R/Makevars ~/.R/Makevars.bak"
-            echo "  -------------------------------------------------------------------"
+            CONFLICT_MSG="WARNING: ~/.R/Makevars may conflict with build flags."
         fi
     fi
 
@@ -92,7 +120,9 @@ fi
 case "$OMP_CFLAGS" in *ERROR*) OMP_CFLAGS="";; esac
 case "$OMP_LIBS" in *ERROR*) OMP_LIBS="";; esac
 
+# ===========================================================================
 # 3. WRITE MAKEVARS
+# ===========================================================================
 mkdir -p src
 
 cat > src/Makevars <<EOF
@@ -101,12 +131,38 @@ PKG_CFLAGS = $OMP_CFLAGS $GSL_CFLAGS
 PKG_LIBS = $OMP_LIBS $GSL_LIBS
 EOF
 
-if [ -n "$OMP_CFLAGS" ]; then
-    echo "OpenMP enabled."
-    echo "  OMP_CFLAGS: $OMP_CFLAGS"
-    echo "  OMP_LIBS:   $OMP_LIBS"
-else
-    echo "WARNING: OpenMP not found. Building single-threaded version."
+if [ -n "$OVERRIDE_LDFLAGS" ]; then
+    cat >> src/Makevars <<EOF
+
+# Override to prioritize the correct OpenMP library path
+LDFLAGS = $OVERRIDE_LDFLAGS
+EOF
 fi
 
-echo "Configuration complete."
+# ===========================================================================
+# 4. FINAL STATUS REPORT
+# ===========================================================================
+
+echo ""
+echo "------------------------------------------------------------------------"
+echo "  RidgeR Configuration Summary"
+echo "------------------------------------------------------------------------"
+echo "  GSL Found:       Yes"
+
+if [ -n "$OMP_CFLAGS" ]; then
+    echo "  OpenMP Status:   ENABLED"
+    echo "  Execution Mode:  Multi-threaded"
+    echo "  Compiler Flags:  $OMP_CFLAGS"
+else
+    echo "  OpenMP Status:   DISABLED"
+    echo "  Execution Mode:  Single-threaded"
+    echo "                   (libomp not found or compiler incompatible)"
+fi
+
+if [ -n "$CONFLICT_MSG" ]; then
+    echo ""
+    echo "  $CONFLICT_MSG"
+fi
+
+echo "------------------------------------------------------------------------"
+echo ""
