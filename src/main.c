@@ -6,6 +6,7 @@
 #include <string.h> // for memcpy
 #include <time.h>   // for seed
 #include <math.h>   // for sqrt, fabs
+#include <Rinternals.h>
 
 #ifdef _OPENMP
   #include <omp.h>  // for OpenMP
@@ -339,4 +340,103 @@ void ridgeRegFast(
   gsl_matrix_partial_free(Y);
   gsl_matrix_partial_free(beta);
   // gsl_matrix_partial_free for se/zscore/pvalue is not needed as we didn't use structs for accumulators
+}
+
+
+// ---------------------------------------------------------
+// .Call Wrapper for R (Supports Long Vectors > 2B elements)
+// ---------------------------------------------------------
+SEXP ridgeRegFast_call_wrapper(
+    SEXP X_sexp, 
+    SEXP Y_sexp, 
+    SEXP lambda_sexp, 
+    SEXP nrand_sexp, 
+    SEXP coreNo_sexp
+) {
+    // 1. Get dimensions from the objects directly
+    // X is (p x n) because it's transposed in R
+    // Y is (m x n) because it's transposed in R
+    // Note: In C gsl_wrapper, size1=rows, size2=cols.
+    
+    // Check dimensions. 
+    // X passed as t(X) -> vector. We need to trust R passed correct n, p.
+    // However, extracting n, p, m from lengths is safer.
+    
+    // We assume the R wrapper handles the transposition and scaling.
+    // Let's get scalars.
+    double lambda = asReal(lambda_sexp);
+    double nrand_val = asReal(nrand_sexp);
+    int nrand = (int)nrand_val;
+    int coreNo = asInteger(coreNo_sexp);
+
+    // X is p x n (transposed from n x p)
+    // R matrices have 'dim' attribute.
+    SEXP x_dim = getAttrib(X_sexp, R_DimSymbol);
+    int p = INTEGER(x_dim)[0]; 
+    int n = INTEGER(x_dim)[1];
+
+    // Y is m x n (transposed from n x m)
+    SEXP y_dim = getAttrib(Y_sexp, R_DimSymbol);
+    // Use R_xlen_t for m because it might be huge
+    R_xlen_t m_long = (R_xlen_t)INTEGER(y_dim)[0]; 
+    
+    // Verify n matches
+    if(INTEGER(y_dim)[1] != n) {
+        error("Dimension mismatch: Columns of t(X) (%d) != Columns of t(Y) (%d)", n, INTEGER(y_dim)[1]);
+    }
+    
+    int m_int = (int)m_long; // Our internal logic uses int for loop limits, but size_t for offsets.
+    // Ideally we update ridgeRegFast to take size_t for m.
+    // The current ridgeRegFast signature takes int* for m. 
+    // Let's update ridgeRegFast signature in the previous file to match size_t if possible,
+    // OR just cast here. 
+    // NOTE: The C code I provided previously ALREADY casts *m_pt to size_t internally.
+    // So passing &m_int is safe as long as m doesn't overflow int (2 Billion).
+    // Wait, m = 1,000,000 fits in int. 
+    // The problem was the vector length n*m (16 Billion) which overflowed .C length check.
+    
+    // 2. Allocate Output Vectors in R (Huge Vectors)
+    R_xlen_t total_len = (R_xlen_t)p * m_long;
+    
+    SEXP beta_sexp = PROTECT(allocVector(REALSXP, total_len));
+    SEXP se_sexp = PROTECT(allocVector(REALSXP, total_len));
+    SEXP zscore_sexp = PROTECT(allocVector(REALSXP, total_len));
+    SEXP pvalue_sexp = PROTECT(allocVector(REALSXP, total_len));
+
+    // 3. Call the logic function
+    // We pass pointers to the data inside the SEXP objects.
+    
+    // ridgeRegFast expects pointers to int, double.
+    ridgeRegFast(
+        REAL(X_sexp),
+        REAL(Y_sexp),
+        &n,
+        &p,
+        &m_int,
+        &lambda,
+        &nrand_val,
+        REAL(beta_sexp),
+        REAL(se_sexp),
+        REAL(zscore_sexp),
+        REAL(pvalue_sexp),
+        &coreNo
+    );
+
+    // 4. Return List
+    SEXP res_list = PROTECT(allocVector(VECSXP, 4));
+    SET_VECTOR_ELT(res_list, 0, beta_sexp);
+    SET_VECTOR_ELT(res_list, 1, se_sexp);
+    SET_VECTOR_ELT(res_list, 2, zscore_sexp);
+    SET_VECTOR_ELT(res_list, 3, pvalue_sexp);
+
+    // Add names
+    SEXP names = PROTECT(allocVector(STRSXP, 4));
+    SET_STRING_ELT(names, 0, mkChar("beta"));
+    SET_STRING_ELT(names, 1, mkChar("se"));
+    SET_STRING_ELT(names, 2, mkChar("zscore"));
+    SET_STRING_ELT(names, 3, mkChar("pvalue"));
+    setAttrib(res_list, R_NamesSymbol, names);
+
+    UNPROTECT(6); // 4 vectors + list + names
+    return res_list;
 }
