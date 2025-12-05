@@ -2,101 +2,12 @@
 
 # SecAct: Secreted Protein Activity Inference
 
-# Installation
+## Installation
 
-`RidgeR` requires:
+To install `RidgeR`, we recommend using `devtools`:
 
-* **GNU Scientific Library (GSL)**
-* **OpenMP** support (for multi-threaded computation)
-* A working **C/C++ toolchain** to build source packages
-
-Installation differs by operating system. Follow the instructions below.
-
----
-
-## **macOS**
-
-On macOS, the easiest way to install dependencies is via **Homebrew**.
-
-### 1. Install Homebrew (if not installed)
-
-```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-```
-
-### 2. Install GSL and LLVM/OpenMP
-
-```bash
-brew install gsl
-brew install llvm libomp
-```
-
-### 3. Install RidgeR
-
-```r
-devtools::install_github("beibeiru/RidgeR")
-```
-
-Test:
-
-```r
-library(RidgeR)
-packageVersion("RidgeR")
-```
-
----
-
-## **Linux (Ubuntu / Debian / RHEL / CentOS)**
-
-Most Linux distributions provide GSL and OpenMP out of the box.
-
-### **Ubuntu / Debian**
-
-```bash
-sudo apt-get update
-sudo apt-get install -y libgsl-dev libomp-dev build-essential
-```
-
-### **RHEL / CentOS / Rocky / AlmaLinux**
-
-```bash
-sudo dnf install gsl-devel gcc gcc-c++ libgomp
-```
-
-(For older CentOS: `yum install` instead of `dnf`.)
-
-### Install RidgeR
-
-```r
-devtools::install_github("beibeiru/RidgeR")
-```
-
----
-
-## **Windows**
-
-Windows requires **Rtools** to compile C/C++ code.
-
-### 1. Install Rtools
-
-Download from CRAN:
-
-[https://cran.r-project.org/bin/windows/Rtools/](https://cran.r-project.org/bin/windows/Rtools/)
-
-Choose the version matching your installed R release.
-
-
-### 2. Install GSL (Windows)
-
-Install GSL via **msys2** (bundled with Rtools40+):
-
-```bash
-pacman -Sy mingw-w64-ucrt-x86_64-gsl
-```
-
-### 3. Install RidgeR
-
-```r
+``` r
+# install.packages("devtools")
 devtools::install_github("beibeiru/RidgeR")
 ```
 
