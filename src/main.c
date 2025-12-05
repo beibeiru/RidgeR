@@ -4,9 +4,12 @@
 #include <gsl/gsl_linalg.h>
 #include <gsl/gsl_cdf.h>
 #include <string.h> // for memcpy
-#include <omp.h>    // for OpenMP
 #include <time.h>   // for seed
 #include <math.h>   // for sqrt, fabs
+
+#ifdef _OPENMP
+  #include <omp.h>    // for OpenMP
+#endif
 
 // --- TUNING ---
 // Number of samples (columns) a thread processes at one time.
@@ -166,7 +169,11 @@ void ridgeRegFast(
   double lambda = *lambda_pt;
   int num_threads = *nthreads_pt;
 
-  if (num_threads > 0) omp_set_num_threads(num_threads);
+  if (num_threads > 0) {
+       #ifdef _OPENMP
+           omp_set_num_threads(num_threads);
+       #endif
+  }
 
   gsl_matrix *X = RVectorObject_to_gsl_matrix(X_vec, n, p);
   gsl_matrix *Y = RVectorObject_to_gsl_matrix(Y_vec, n, m);
