@@ -1,8 +1,9 @@
 #include <R.h>
+#include <Rinternals.h> // Required for .Call
+#include <R_ext/Rdynload.h> // For registration
 #include <gsl/gsl_matrix.h>
 #include <gsl/gsl_blas.h>
 #include <gsl/gsl_linalg.h>
-#include <gsl/gsl_cdf.h>
 #include <string.h> // for memcpy
 #include <time.h>   // for seed
 #include <math.h>   // for sqrt, fabs
@@ -23,14 +24,13 @@
 /* =========================================================
    HELPER FUNCTIONS
    ========================================================= */
-
 gsl_matrix *RVectorObject_to_gsl_matrix(double *vec, size_t nr, size_t nc)
 {
   gsl_block *b = (gsl_block*)malloc(sizeof(gsl_block));
   gsl_matrix *r = (gsl_matrix*)malloc(sizeof(gsl_matrix));
   r->size1 = nr;
   r->tda = r->size2 = nc;
-  r->owner = 1; 
+  r->owner = 1; // We own the struct, but NOT the data
   b->data = r->data = vec;
   r->block = b;
   b->size = r->size1 * r->size2;
@@ -153,34 +153,28 @@ void ridgeReg(
 /* =========================================================
    NEW VERSION (Safe for Huge Data)
    ========================================================= */
-void ridgeRegFast(
+
+// Internal logic for the new function
+void ridgeRegFast_core(
   double *X_vec, double *Y_vec,
-  int *n_pt, int *p_pt, int *m_pt,
-  double *lambda_pt, double *nrand_pt,
+  size_t n, size_t p, size_t m,
+  double lambda, int nrand,
   double *beta_vec, double *se_vec, double *zscore_vec, double *pvalue_vec,
-  int *nthreads_pt
+  int num_threads
 )
 {
-  // Use size_t for all dimensions to prevent integer overflow
-  size_t n = (size_t)*n_pt;
-  size_t p = (size_t)*p_pt;
-  size_t m = (size_t)*m_pt;
-  int nrand = (int)*nrand_pt;
-  double lambda = *lambda_pt;
-  int num_threads = *nthreads_pt;
-
   if (num_threads > 0) {
        #ifdef _OPENMP
            omp_set_num_threads(num_threads);
        #endif
   }
 
+  // Use R_xlen_t for total elements to support > 2 billion
+  R_xlen_t total_elements = (R_xlen_t)p * (R_xlen_t)m;
+
   gsl_matrix *X = RVectorObject_to_gsl_matrix(X_vec, n, p);
   gsl_matrix *Y = RVectorObject_to_gsl_matrix(Y_vec, n, m);
   gsl_matrix *beta = RVectorObject_to_gsl_matrix(beta_vec, p, m);
-  
-  // NOTE: For huge m, we do NOT allocate full accumulators in GSL
-  // We use the raw double pointers passed from R directly (se_vec, etc.)
   
   gsl_matrix *I_mat = gsl_matrix_alloc(p, p);
   gsl_matrix *T = gsl_matrix_alloc(p, n);
@@ -195,240 +189,138 @@ void ridgeRegFast(
   // 2. Real Beta
   gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, Y, 0.0, beta);
 
-  // 3. Pre-calculate Permutations
+  // 3. Permutations Setup
   int *perm_table = (int*)malloc((size_t)nrand * n * sizeof(int));
   int *temp_idx = (int*)malloc(n * sizeof(int));
-  
-  size_t k;
-  for(k=0; k<n; k++) temp_idx[k] = (int)k;
+  for(size_t k=0; k<n; k++) temp_idx[k] = (int)k;
 
   srand(0);
-
   for(int i_rand = 0; i_rand < nrand; i_rand++) {
     shuffle(temp_idx, (int)n);
     memcpy(&perm_table[(size_t)i_rand * n], temp_idx, n * sizeof(int));
   }
   free(temp_idx);
 
-  // Initialize outputs to 0
-  // Note: Using parallel loop for initialization as size could be huge (1M * 1000)
-  size_t total_elements = p * m;
-  #pragma omp parallel for
-  for(size_t i=0; i<total_elements; i++) {
+  // Initialize outputs
+  // Using R_xlen_t for loop variable to handle long vectors
+  #pragma omp parallel for schedule(static)
+  for(R_xlen_t i=0; i<total_elements; i++) {
     pvalue_vec[i] = 0.0;
-    se_vec[i] = 0.0;     // aver_sq
-    zscore_vec[i] = 0.0; // aver
+    se_vec[i] = 0.0;     
+    zscore_vec[i] = 0.0; 
   }
-  // Reuse pointers for clarity: zscore_vec is used for 'aver' temporarily
 
-  // 4. Parallelize over SAMPLES (Columns)
-  // Each thread takes a disjoint set of columns. No memory conflicts.
+  // 4. Parallel Processing
   #pragma omp parallel
   {
-    // Small buffers, fixed size. Safe for any m.
-    // Dimensions: n x (SAMPLE_STRIP_SIZE * PERM_BATCH_SIZE)
     gsl_matrix *Y_block = gsl_matrix_alloc(n, SAMPLE_STRIP_SIZE * PERM_BATCH_SIZE);
     gsl_matrix *Beta_block = gsl_matrix_alloc(p, SAMPLE_STRIP_SIZE * PERM_BATCH_SIZE);
     
-    // Iterate over chunks of columns (Samples)
-    size_t col_start;
     #pragma omp for schedule(dynamic)
-    for(col_start = 0; col_start < m; col_start += SAMPLE_STRIP_SIZE) 
+    for(size_t col_start = 0; col_start < m; col_start += SAMPLE_STRIP_SIZE) 
     {
       size_t current_cols = (col_start + SAMPLE_STRIP_SIZE > m) ? (m - col_start) : SAMPLE_STRIP_SIZE;
       
-      // Iterate over batches of permutations
-      int b_start;
-      for(b_start = 0; b_start < nrand; b_start += PERM_BATCH_SIZE)
+      for(int b_start = 0; b_start < nrand; b_start += PERM_BATCH_SIZE)
       {
         int current_perms = (b_start + PERM_BATCH_SIZE > nrand) ? (nrand - b_start) : PERM_BATCH_SIZE;
 
-        // A. Construct Y_block (Stacking permutations side-by-side)
-        int i_perm;
-        size_t row;
-        
-        for(i_perm = 0; i_perm < current_perms; i_perm++) {
+        // Construct Permuted Y Block
+        for(int i_perm = 0; i_perm < current_perms; i_perm++) {
            int *current_perm_idx = &perm_table[(size_t)(b_start + i_perm) * n];
-           
-           for(row = 0; row < n; row++) {
-             // Copy logic: Get permuted ROW from Y, copy 'current_cols' elements
-             // Y->data is row-major? No, R matrices are usually COL-major, 
-             // but our wrapper says size1=n, size2=m. 
-             // IMPORTANT: R stores matrices as Column-Major.
-             // But we passed t(X) and t(Y) from R, so in C they look Row-Major.
-             // So Y->data is linear. row 'r' starts at Y->data + r*m.
-             
-             // Offset in Y_block: (row * tda) + (i_perm * current_cols)
-             // Offset in Y:       (permuted_row * tda) + col_start
-             
-             memcpy(Y_block->data + (row * Y_block->tda) + (i_perm * current_cols),
+           for(size_t row = 0; row < n; row++) {
+             memcpy(Y_block->data + (row * Y_block->tda) + ((size_t)i_perm * current_cols),
                     Y->data + ((size_t)current_perm_idx[row] * Y->tda) + col_start,
                     current_cols * sizeof(double));
            }
         }
 
-        // B. Matrix Multiply
         gsl_matrix_view Y_sub = gsl_matrix_submatrix(Y_block, 0, 0, n, current_perms * current_cols);
         gsl_matrix_view B_sub = gsl_matrix_submatrix(Beta_block, 0, 0, p, current_perms * current_cols);
         
+        // Matrix Multiply
         gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, &Y_sub.matrix, 0.0, &B_sub.matrix);
 
-        // C. Update Stats (Direct write to global arrays, no contention)
-        size_t r, c_local;
-        for(i_perm = 0; i_perm < current_perms; i_perm++) {
-          for(r = 0; r < p; r++) {
-            for(c_local = 0; c_local < current_cols; c_local++) {
+        // Aggregate Stats
+        for(int i_perm = 0; i_perm < current_perms; i_perm++) {
+          for(size_t r = 0; r < p; r++) {
+            for(size_t c_local = 0; c_local < current_cols; c_local++) {
               
-              size_t global_col_idx = col_start + c_local;
-              size_t global_idx = r * m + global_col_idx; // Linear index in output
+              R_xlen_t global_idx = (R_xlen_t)r * m + (col_start + c_local);
               
-              double b_rnd = gsl_matrix_get(&B_sub.matrix, r, (i_perm * current_cols) + c_local);
+              double b_rnd = gsl_matrix_get(&B_sub.matrix, r, ((size_t)i_perm * current_cols) + c_local);
               double b_obs = beta_vec[global_idx]; 
 
               if(fabs(b_rnd) >= fabs(b_obs)) {
                 pvalue_vec[global_idx] += 1.0;
               }
-              zscore_vec[global_idx] += b_rnd;           // Sum
-              se_vec[global_idx]     += (b_rnd * b_rnd); // Sum Sq
+              zscore_vec[global_idx] += b_rnd;
+              se_vec[global_idx]     += (b_rnd * b_rnd);
             }
           }
         }
       }
     }
-
     gsl_matrix_free(Y_block);
     gsl_matrix_free(Beta_block);
   }
 
   free(perm_table);
 
-  // 5. Finalize (Parallelized)
   double inv_nrand = 1.0 / nrand;
-  
-  #pragma omp parallel for
-  for(size_t i=0; i<total_elements; i++) {
-    // P-value
+  #pragma omp parallel for schedule(static)
+  for(R_xlen_t i=0; i<total_elements; i++) {
     pvalue_vec[i] = (pvalue_vec[i] + 1.0) / (nrand + 1.0);
-
-    // Mean and SE
     double mean_rand = zscore_vec[i] * inv_nrand;
     double mean_sq_rand = se_vec[i] * inv_nrand;
-    
     double var_rand = mean_sq_rand - (mean_rand * mean_rand);
     if(var_rand < 0) var_rand = 0;
     double se_rand = sqrt(var_rand);
-    
-    // Store back
-    se_vec[i] = se_rand; // This is now SE, not SumSq
-    
-    // Z-score
+    se_vec[i] = se_rand;
     double obs = beta_vec[i];
-    if(se_rand > 0) {
-      zscore_vec[i] = (obs - mean_rand) / se_rand;
-    } else {
-      zscore_vec[i] = 0.0;
-    }
+    zscore_vec[i] = (se_rand > 1e-12) ? (obs - mean_rand) / se_rand : 0.0;
   }
 
-  gsl_matrix_free(I_mat);
-  gsl_matrix_free(T);
-  // Note: 'aver' was not allocated, we used zscore_vec
-  // gsl_matrix_free(aver); 
-
-  gsl_matrix_partial_free(X);
-  gsl_matrix_partial_free(Y);
-  gsl_matrix_partial_free(beta);
-  // gsl_matrix_partial_free for se/zscore/pvalue is not needed as we didn't use structs for accumulators
+  gsl_matrix_free(I_mat); gsl_matrix_free(T);
+  gsl_matrix_partial_free(X); gsl_matrix_partial_free(Y); gsl_matrix_partial_free(beta);
 }
 
-
-// ---------------------------------------------------------
-// .Call Wrapper for R (Supports Long Vectors > 2B elements)
-// ---------------------------------------------------------
-SEXP ridgeRegFast_call_wrapper(
-    SEXP X_sexp, 
-    SEXP Y_sexp, 
-    SEXP lambda_sexp, 
-    SEXP nrand_sexp, 
-    SEXP coreNo_sexp
-) {
-    // 1. Get dimensions from the objects directly
-    // X is (p x n) because it's transposed in R
-    // Y is (m x n) because it's transposed in R
-    // Note: In C gsl_wrapper, size1=rows, size2=cols.
-    
-    // Check dimensions. 
-    // X passed as t(X) -> vector. We need to trust R passed correct n, p.
-    // However, extracting n, p, m from lengths is safer.
-    
-    // We assume the R wrapper handles the transposition and scaling.
-    // Let's get scalars.
+// .Call Interface (Required for Long Vectors)
+SEXP ridgeRegFast_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp, SEXP nrand_sexp, SEXP ncores_sexp) 
+{
     double lambda = asReal(lambda_sexp);
-    double nrand_val = asReal(nrand_sexp);
-    int nrand = (int)nrand_val;
-    int coreNo = asInteger(coreNo_sexp);
+    int nrand = asInteger(nrand_sexp);
+    int ncores = asInteger(ncores_sexp);
 
-    // X is p x n (transposed from n x p)
-    // R matrices have 'dim' attribute.
+    // Get dims. Note: Inputs are Transposed matrices from R.
+    // X is (P x N), Y is (M x N)
     SEXP x_dim = getAttrib(X_sexp, R_DimSymbol);
-    int p = INTEGER(x_dim)[0]; 
-    int n = INTEGER(x_dim)[1];
+    size_t p = (size_t)INTEGER(x_dim)[0]; 
+    size_t n = (size_t)INTEGER(x_dim)[1];
 
-    // Y is m x n (transposed from n x m)
     SEXP y_dim = getAttrib(Y_sexp, R_DimSymbol);
-    // Use R_xlen_t for m because it might be huge
-    R_xlen_t m_long = (R_xlen_t)INTEGER(y_dim)[0]; 
+    size_t m = (size_t)INTEGER(y_dim)[0];
     
-    // Verify n matches
-    if(INTEGER(y_dim)[1] != n) {
-        error("Dimension mismatch: Columns of t(X) (%d) != Columns of t(Y) (%d)", n, INTEGER(y_dim)[1]);
-    }
-    
-    int m_int = (int)m_long; // Our internal logic uses int for loop limits, but size_t for offsets.
-    // Ideally we update ridgeRegFast to take size_t for m.
-    // The current ridgeRegFast signature takes int* for m. 
-    // Let's update ridgeRegFast signature in the previous file to match size_t if possible,
-    // OR just cast here. 
-    // NOTE: The C code I provided previously ALREADY casts *m_pt to size_t internally.
-    // So passing &m_int is safe as long as m doesn't overflow int (2 Billion).
-    // Wait, m = 1,000,000 fits in int. 
-    // The problem was the vector length n*m (16 Billion) which overflowed .C length check.
-    
-    // 2. Allocate Output Vectors in R (Huge Vectors)
-    R_xlen_t total_len = (R_xlen_t)p * m_long;
-    
-    SEXP beta_sexp = PROTECT(allocVector(REALSXP, total_len));
-    SEXP se_sexp = PROTECT(allocVector(REALSXP, total_len));
+    // Allocate Huge Vectors (Long Vector support)
+    R_xlen_t total_len = (R_xlen_t)p * (R_xlen_t)m;
+
+    SEXP beta_sexp   = PROTECT(allocVector(REALSXP, total_len));
+    SEXP se_sexp     = PROTECT(allocVector(REALSXP, total_len));
     SEXP zscore_sexp = PROTECT(allocVector(REALSXP, total_len));
     SEXP pvalue_sexp = PROTECT(allocVector(REALSXP, total_len));
 
-    // 3. Call the logic function
-    // We pass pointers to the data inside the SEXP objects.
-    
-    // ridgeRegFast expects pointers to int, double.
-    ridgeRegFast(
-        REAL(X_sexp),
-        REAL(Y_sexp),
-        &n,
-        &p,
-        &m_int,
-        &lambda,
-        &nrand_val,
-        REAL(beta_sexp),
-        REAL(se_sexp),
-        REAL(zscore_sexp),
-        REAL(pvalue_sexp),
-        &coreNo
+    ridgeRegFast_core(
+        REAL(X_sexp), REAL(Y_sexp), n, p, m, lambda, nrand,
+        REAL(beta_sexp), REAL(se_sexp), REAL(zscore_sexp), REAL(pvalue_sexp),
+        ncores
     );
 
-    // 4. Return List
     SEXP res_list = PROTECT(allocVector(VECSXP, 4));
     SET_VECTOR_ELT(res_list, 0, beta_sexp);
     SET_VECTOR_ELT(res_list, 1, se_sexp);
     SET_VECTOR_ELT(res_list, 2, zscore_sexp);
     SET_VECTOR_ELT(res_list, 3, pvalue_sexp);
 
-    // Add names
     SEXP names = PROTECT(allocVector(STRSXP, 4));
     SET_STRING_ELT(names, 0, mkChar("beta"));
     SET_STRING_ELT(names, 1, mkChar("se"));
@@ -436,6 +328,24 @@ SEXP ridgeRegFast_call_wrapper(
     SET_STRING_ELT(names, 3, mkChar("pvalue"));
     setAttrib(res_list, R_NamesSymbol, names);
 
-    UNPROTECT(6); // 4 vectors + list + names
+    UNPROTECT(6); 
     return res_list;
 }
+
+// Registration
+static const R_CMethodDef cMethods[] = {
+    {"ridgeReg", (DL_FUNC) &ridgeReg, 11},
+    {NULL, NULL, 0}
+};
+
+static const R_CallMethodDef callMethods[] = {
+    {"ridgeRegFast_interface", (DL_FUNC) &ridgeRegFast_interface, 5},
+    {NULL, NULL, 0}
+};
+
+void R_init_SecAct(DllInfo *dll) {
+    R_registerRoutines(dll, cMethods, callMethods, NULL, NULL);
+    R_useDynamicSymbols(dll, FALSE);
+}
+
+
