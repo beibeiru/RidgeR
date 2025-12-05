@@ -4,16 +4,6 @@
 # 1. GSL DETECTION
 # ===========================================================================
 echo "Checking for GSL..."
-<<<<<<< HEAD
-if ! command -v gsl-config >/dev/null 2>&1; then
-    echo "ERROR: GSL is not installed or gsl-config is not in PATH."
-    echo "Please install GSL first:"
-    echo "  macOS: brew install gsl"
-    echo "  Ubuntu/Debian: sudo apt-get install libgsl-dev"
-    echo "  RedHat/CentOS: sudo yum install gsl-devel"
-    echo "  Fedora/RHEL: sudo dnf install gsl-devel"
-    echo "  "
-=======
 
 # Define potential locations for gsl-config on macOS/Linux
 GSL_CONFIG_EXEC="gsl-config"
@@ -32,7 +22,6 @@ fi
 # Final check: Can we execute it?
 if ! "$GSL_CONFIG_EXEC" --version >/dev/null 2>&1; then
     echo "ERROR: GSL is not installed or gsl-config is not found."
->>>>>>> a89e95e5195742cb1de774cea83a55218bf08090
     exit 1
 fi
 
@@ -58,10 +47,6 @@ if [ "$OS" = "Darwin" ]; then
     # Case A: Homebrew LLVM Clang
     if echo "$R_CC" | grep -q "opt/homebrew/opt/llvm"; then
         LLVM_LIB="/opt/homebrew/opt/llvm/lib"
-<<<<<<< HEAD
-
-=======
->>>>>>> a89e95e5195742cb1de774cea83a55218bf08090
         if [ -d "$LLVM_LIB" ]; then
             OMP_CFLAGS="-fopenmp -I/opt/homebrew/opt/llvm/include"
             OMP_LIBS="$LLVM_LIB/libomp.dylib -Wl,-rpath,$LLVM_LIB"
@@ -75,11 +60,6 @@ if [ "$OS" = "Darwin" ]; then
 
     # Case C: Standard Apple Clang (Xcode) using Homebrew libomp
     else
-<<<<<<< HEAD
-        echo "  Detected Standard Apple Clang."
-
-=======
->>>>>>> a89e95e5195742cb1de774cea83a55218bf08090
         if [ -f "/opt/homebrew/opt/libomp/lib/libomp.dylib" ]; then
             # Apple Silicon
             OMP_CFLAGS="-Xpreprocessor -fopenmp -I/opt/homebrew/opt/libomp/include"
@@ -97,13 +77,8 @@ if [ "$OS" = "Darwin" ]; then
              OMP_LIBS=$(R CMD config SHLIB_OPENMP_CFLAGS 2>/dev/null)
         fi
     fi
-<<<<<<< HEAD
 
-    # WARN USER: Check for dangerous ~/.R/Makevars
-=======
-    
     # Check for ~/.R/Makevars conflict
->>>>>>> a89e95e5195742cb1de774cea83a55218bf08090
     if [ -f "$HOME/.R/Makevars" ]; then
         if grep -q "usr/local.*omp\|lomp" "$HOME/.R/Makevars" 2>/dev/null; then
             CONFLICT_MSG="WARNING: ~/.R/Makevars may conflict with build flags."
