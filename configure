@@ -4,6 +4,12 @@
 echo "Checking for GSL..."
 if ! command -v gsl-config >/dev/null 2>&1; then
     echo "ERROR: GSL is not installed or gsl-config is not in PATH."
+    echo "Please install GSL first:"
+    echo "  macOS: brew install gsl"
+    echo "  Ubuntu/Debian: sudo apt-get install libgsl-dev"
+    echo "  RedHat/CentOS: sudo yum install gsl-devel"
+    echo "  Fedora/RHEL: sudo dnf install gsl-devel"
+    echo "  "
     exit 1
 fi
 GSL_CFLAGS=$(gsl-config --cflags)
@@ -22,12 +28,12 @@ R_CC=$(R CMD config CC)
 
 if [ "$OS" = "Darwin" ]; then
     # --- macOS Specific Logic ---
-    
+
     # Case A: Homebrew LLVM Clang
     if echo "$R_CC" | grep -q "opt/homebrew/opt/llvm"; then
         echo "  Detected Homebrew LLVM Compiler."
         LLVM_LIB="/opt/homebrew/opt/llvm/lib"
-        
+
         if [ -d "$LLVM_LIB" ]; then
             OMP_CFLAGS="-fopenmp -I/opt/homebrew/opt/llvm/include"
             # Link to LLVM's specific libomp
@@ -35,23 +41,23 @@ if [ "$OS" = "Darwin" ]; then
             # Force linker to look here first
             OVERRIDE_LDFLAGS="-L$LLVM_LIB"
         fi
-        
+
     # Case B: MacPorts LLVM
     elif echo "$R_CC" | grep -q "opt/local/bin"; then
         echo "  Detected MacPorts LLVM Compiler."
         OMP_CFLAGS="-fopenmp"
         OMP_LIBS="-lomp"
-        
+
     # Case C: Standard Apple Clang (Xcode) using Homebrew libomp
     else
         echo "  Detected Standard Apple Clang."
-        
+
         if [ -f "/opt/homebrew/opt/libomp/lib/libomp.dylib" ]; then
             # Apple Silicon
             OMP_CFLAGS="-Xpreprocessor -fopenmp -I/opt/homebrew/opt/libomp/include"
             OMP_LIBS="/opt/homebrew/opt/libomp/lib/libomp.dylib -Wl,-rpath,/opt/homebrew/opt/libomp/lib"
             OVERRIDE_LDFLAGS="-L/opt/homebrew/opt/libomp/lib"
-            
+
         elif [ -f "/usr/local/opt/libomp/lib/libomp.dylib" ]; then
             # Intel Mac
             OMP_CFLAGS="-Xpreprocessor -fopenmp -I/usr/local/opt/libomp/include"
@@ -63,7 +69,7 @@ if [ "$OS" = "Darwin" ]; then
              OMP_LIBS=$(R CMD config SHLIB_OPENMP_CFLAGS 2>/dev/null)
         fi
     fi
-    
+
     # WARN USER: Check for dangerous ~/.R/Makevars
     if [ -f "$HOME/.R/Makevars" ]; then
         if grep -q "usr/local.*omp\|lomp" "$HOME/.R/Makevars" 2>/dev/null; then
