@@ -6,7 +6,6 @@
 #include <string.h> // for memcpy
 #include <time.h>   // for seed
 #include <math.h>   // for sqrt, fabs
-#include <Rinternals.h>
 
 #ifdef _OPENMP
   #include <omp.h>  // for OpenMP
