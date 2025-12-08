@@ -1,8 +1,9 @@
 #include <R.h>
+#include <Rinternals.h> // Required for .Call
+#include <R_ext/Rdynload.h> // For registration
 #include <gsl/gsl_matrix.h>
 #include <gsl/gsl_blas.h>
 #include <gsl/gsl_linalg.h>
-#include <gsl/gsl_cdf.h>
 #include <string.h> // for memcpy
 #include <time.h>   // for seed
 #include <math.h>   // for sqrt, fabs
@@ -151,192 +152,225 @@ void ridgeReg(
 }
 
 /* =========================================================
-   NEW VERSION (Safe for Huge Data)
+   NEW OPTIMIZED FUNCTION (Long Vector Support)
    ========================================================= */
-void ridgeRegFast(
-  double *X_vec, double *Y_vec,
-  int *n_pt, int *p_pt, int *m_pt,
-  double *lambda_pt, double *nrand_pt,
+
+// Internal logic for the new function
+void ridgeRegFast_core(
+  double *X_ptr, double *Y_ptr, // Raw R pointers
+  size_t n, size_t p, size_t m, // n=genes, p=proteins, m=samples
+  double lambda, int nrand,
   double *beta_vec, double *se_vec, double *zscore_vec, double *pvalue_vec,
-  int *nthreads_pt
+  int num_threads
 )
 {
-  // Use size_t for all dimensions to prevent integer overflow
-  size_t n = (size_t)*n_pt;
-  size_t p = (size_t)*p_pt;
-  size_t m = (size_t)*m_pt;
-  int nrand = (int)*nrand_pt;
-  double lambda = *lambda_pt;
-  int num_threads = *nthreads_pt;
-
   if (num_threads > 0) {
        #ifdef _OPENMP
            omp_set_num_threads(num_threads);
        #endif
   }
 
-  gsl_matrix *X = RVectorObject_to_gsl_matrix(X_vec, n, p);
-  gsl_matrix *Y = RVectorObject_to_gsl_matrix(Y_vec, n, m);
+  // --- THE TRICK ---
+  // R stores X as (n x p) Column-Major.
+  // GSL reads Row-Major. 
+  // If we map X_ptr as (p x n), GSL sees exactly t(X).
+  // This is perfect because the math usually requires X' anyway.
+  
+  // We want X_gsl to be (p x n) and Y_gsl to be (m x n) for efficient row slicing
+  gsl_matrix *Xt = RVectorObject_to_gsl_matrix(X_ptr, p, n); // Effectively t(X)
+  gsl_matrix *Yt = RVectorObject_to_gsl_matrix(Y_ptr, m, n); // Effectively t(Y)
   gsl_matrix *beta = RVectorObject_to_gsl_matrix(beta_vec, p, m);
-  
-  // NOTE: For huge m, we do NOT allocate full accumulators in GSL
-  // We use the raw double pointers passed from R directly (se_vec, etc.)
-  
+
+  // Allocations
   gsl_matrix *I_mat = gsl_matrix_alloc(p, p);
   gsl_matrix *T = gsl_matrix_alloc(p, n);
+
+  // 1. Projection: T = (X'X + lambda*I)^-1 * X'
+  // Note: Since Xt is already transposed view, we use CblasNoTrans where we used Trans before
+  // Math: X_real = X (n x p). Xt = X' (p x n).
+  // We need (Xt * X)^-1. 
+  // In GSL with our view: Xt * Xt' 
   
-  // 1. Projection Matrix
   gsl_matrix_set_identity(I_mat);
-  gsl_blas_dsyrk(CblasLower, CblasTrans, 1.0, X, lambda, I_mat);
+  // Xt (p x n) * Xt^T (n x p) -> (p x p)
+  gsl_blas_dsyrk(CblasLower, CblasNoTrans, 1.0, Xt, lambda, I_mat);
   gsl_linalg_cholesky_decomp(I_mat);
   gsl_linalg_cholesky_invert(I_mat);
-  gsl_blas_dgemm(CblasNoTrans, CblasTrans, 1.0, I_mat, X, 0.0, T);
+  
+  // T = Inv * Xt
+  gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, I_mat, Xt, 0.0, T);
 
-  // 2. Real Beta
-  gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, Y, 0.0, beta);
+  // 2. Real Beta = T * Y_real
+  // Y_real is (n x m). Yt view is (m x n).
+  // Beta = T (p x n) * Y_real (n x m).
+  // Using Yt view: T * Yt^T
+  gsl_blas_dgemm(CblasNoTrans, CblasTrans, 1.0, T, Yt, 0.0, beta);
 
-  // 3. Pre-calculate Permutations
+  // 3. Permutations
   int *perm_table = (int*)malloc((size_t)nrand * n * sizeof(int));
   int *temp_idx = (int*)malloc(n * sizeof(int));
-  
-  size_t k;
-  for(k=0; k<n; k++) temp_idx[k] = (int)k;
+  for(size_t k=0; k<n; k++) temp_idx[k] = (int)k;
 
   srand(0);
-
   for(int i_rand = 0; i_rand < nrand; i_rand++) {
     shuffle(temp_idx, (int)n);
     memcpy(&perm_table[(size_t)i_rand * n], temp_idx, n * sizeof(int));
   }
   free(temp_idx);
 
-  // Initialize outputs to 0
-  // Note: Using parallel loop for initialization as size could be huge (1M * 1000)
-  size_t total_elements = p * m;
-  #pragma omp parallel for
-  for(size_t i=0; i<total_elements; i++) {
-    pvalue_vec[i] = 0.0;
-    se_vec[i] = 0.0;     // aver_sq
-    zscore_vec[i] = 0.0; // aver
+  // Init outputs
+  R_xlen_t total_elements = (R_xlen_t)p * (R_xlen_t)m;
+  #pragma omp parallel for schedule(static)
+  for(R_xlen_t i=0; i<total_elements; i++) {
+    pvalue_vec[i] = 0.0; se_vec[i] = 0.0; zscore_vec[i] = 0.0; 
   }
-  // Reuse pointers for clarity: zscore_vec is used for 'aver' temporarily
 
-  // 4. Parallelize over SAMPLES (Columns)
-  // Each thread takes a disjoint set of columns. No memory conflicts.
+  // 4. Parallel Loop
   #pragma omp parallel
   {
-    // Small buffers, fixed size. Safe for any m.
-    // Dimensions: n x (SAMPLE_STRIP_SIZE * PERM_BATCH_SIZE)
+    // Buffers
     gsl_matrix *Y_block = gsl_matrix_alloc(n, SAMPLE_STRIP_SIZE * PERM_BATCH_SIZE);
     gsl_matrix *Beta_block = gsl_matrix_alloc(p, SAMPLE_STRIP_SIZE * PERM_BATCH_SIZE);
     
-    // Iterate over chunks of columns (Samples)
-    size_t col_start;
+    // Loop over SAMPLES (which are Rows in our Yt view!)
+    // This allows efficient row slicing which GSL loves.
     #pragma omp for schedule(dynamic)
-    for(col_start = 0; col_start < m; col_start += SAMPLE_STRIP_SIZE) 
+    for(size_t samp_start = 0; samp_start < m; samp_start += SAMPLE_STRIP_SIZE) 
     {
-      size_t current_cols = (col_start + SAMPLE_STRIP_SIZE > m) ? (m - col_start) : SAMPLE_STRIP_SIZE;
+      size_t current_samples = (samp_start + SAMPLE_STRIP_SIZE > m) ? (m - samp_start) : SAMPLE_STRIP_SIZE;
       
-      // Iterate over batches of permutations
-      int b_start;
-      for(b_start = 0; b_start < nrand; b_start += PERM_BATCH_SIZE)
+      for(int b_start = 0; b_start < nrand; b_start += PERM_BATCH_SIZE)
       {
         int current_perms = (b_start + PERM_BATCH_SIZE > nrand) ? (nrand - b_start) : PERM_BATCH_SIZE;
 
-        // A. Construct Y_block (Stacking permutations side-by-side)
-        int i_perm;
-        size_t row;
-        
-        for(i_perm = 0; i_perm < current_perms; i_perm++) {
-           int *current_perm_idx = &perm_table[(size_t)(b_start + i_perm) * n];
+        // Construct Y_block
+        // Yt is (m samples x n genes). We take specific rows (samples) and permute columns (genes).
+        for(int i_perm = 0; i_perm < current_perms; i_perm++) {
+           int *p_idx = &perm_table[(size_t)(b_start + i_perm) * n];
            
-           for(row = 0; row < n; row++) {
-             // Copy logic: Get permuted ROW from Y, copy 'current_cols' elements
-             // Y->data is row-major? No, R matrices are usually COL-major, 
-             // but our wrapper says size1=n, size2=m. 
-             // IMPORTANT: R stores matrices as Column-Major.
-             // But we passed t(X) and t(Y) from R, so in C they look Row-Major.
-             // So Y->data is linear. row 'r' starts at Y->data + r*m.
+           for(size_t s_local = 0; s_local < current_samples; s_local++) {
+             // We need to construct columns in Y_block from rows in Yt
+             // This is a transposing copy, but block size is small (cache friendly).
              
-             // Offset in Y_block: (row * tda) + (i_perm * current_cols)
-             // Offset in Y:       (permuted_row * tda) + col_start
+             // Yt row index
+             size_t global_samp_idx = samp_start + s_local;
+             double *src_row = gsl_matrix_ptr(Yt, global_samp_idx, 0);
              
-             memcpy(Y_block->data + (row * Y_block->tda) + (i_perm * current_cols),
-                    Y->data + ((size_t)current_perm_idx[row] * Y->tda) + col_start,
-                    current_cols * sizeof(double));
+             // Destination column in Y_block
+             size_t dest_col = (i_perm * current_samples) + s_local;
+             
+             for(size_t gene = 0; gene < n; gene++) {
+               // Apply permutation here. 
+               // Standard logic: permute rows of Y. 
+               // Here Yt is (Samples x Genes). We want to permute Genes.
+               // So we pick src_row[ p_idx[gene] ]
+               double val = src_row[ p_idx[gene] ];
+               gsl_matrix_set(Y_block, gene, dest_col, val);
+             }
            }
         }
 
-        // B. Matrix Multiply
-        gsl_matrix_view Y_sub = gsl_matrix_submatrix(Y_block, 0, 0, n, current_perms * current_cols);
-        gsl_matrix_view B_sub = gsl_matrix_submatrix(Beta_block, 0, 0, p, current_perms * current_cols);
+        // Multiply: Beta = T * Y_block
+        gsl_matrix_view Y_sub = gsl_matrix_submatrix(Y_block, 0, 0, n, current_perms * current_samples);
+        gsl_matrix_view B_sub = gsl_matrix_submatrix(Beta_block, 0, 0, p, current_perms * current_samples);
         
         gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, &Y_sub.matrix, 0.0, &B_sub.matrix);
 
-        // C. Update Stats (Direct write to global arrays, no contention)
-        size_t r, c_local;
-        for(i_perm = 0; i_perm < current_perms; i_perm++) {
-          for(r = 0; r < p; r++) {
-            for(c_local = 0; c_local < current_cols; c_local++) {
+        // Stats
+        for(int i_perm = 0; i_perm < current_perms; i_perm++) {
+          for(size_t r = 0; r < p; r++) {
+            for(size_t s_local = 0; s_local < current_samples; s_local++) {
               
-              size_t global_col_idx = col_start + c_local;
-              size_t global_idx = r * m + global_col_idx; // Linear index in output
+              R_xlen_t global_idx = (R_xlen_t)r * m + (samp_start + s_local);
               
-              double b_rnd = gsl_matrix_get(&B_sub.matrix, r, (i_perm * current_cols) + c_local);
+              double b_rnd = gsl_matrix_get(&B_sub.matrix, r, ((size_t)i_perm * current_samples) + s_local);
               double b_obs = beta_vec[global_idx]; 
 
-              if(fabs(b_rnd) >= fabs(b_obs)) {
-                pvalue_vec[global_idx] += 1.0;
-              }
-              zscore_vec[global_idx] += b_rnd;           // Sum
-              se_vec[global_idx]     += (b_rnd * b_rnd); // Sum Sq
+              if(fabs(b_rnd) >= fabs(b_obs)) pvalue_vec[global_idx] += 1.0;
+              zscore_vec[global_idx] += b_rnd;
+              se_vec[global_idx]     += (b_rnd * b_rnd);
             }
           }
         }
       }
     }
-
-    gsl_matrix_free(Y_block);
-    gsl_matrix_free(Beta_block);
+    gsl_matrix_free(Y_block); gsl_matrix_free(Beta_block);
   }
 
   free(perm_table);
-
-  // 5. Finalize (Parallelized)
+  // Finalize (Same as before)
   double inv_nrand = 1.0 / nrand;
-  
-  #pragma omp parallel for
-  for(size_t i=0; i<total_elements; i++) {
-    // P-value
+  #pragma omp parallel for schedule(static)
+  for(R_xlen_t i=0; i<total_elements; i++) {
     pvalue_vec[i] = (pvalue_vec[i] + 1.0) / (nrand + 1.0);
-
-    // Mean and SE
     double mean_rand = zscore_vec[i] * inv_nrand;
-    double mean_sq_rand = se_vec[i] * inv_nrand;
-    
-    double var_rand = mean_sq_rand - (mean_rand * mean_rand);
-    if(var_rand < 0) var_rand = 0;
-    double se_rand = sqrt(var_rand);
-    
-    // Store back
-    se_vec[i] = se_rand; // This is now SE, not SumSq
-    
-    // Z-score
-    double obs = beta_vec[i];
-    if(se_rand > 0) {
-      zscore_vec[i] = (obs - mean_rand) / se_rand;
-    } else {
-      zscore_vec[i] = 0.0;
-    }
+    double var_rand = (se_vec[i] * inv_nrand) - (mean_rand * mean_rand);
+    double se_rand = sqrt(var_rand > 0 ? var_rand : 0);
+    se_vec[i] = se_rand;
+    zscore_vec[i] = (se_rand > 1e-12) ? (beta_vec[i] - mean_rand) / se_rand : 0.0;
   }
 
-  gsl_matrix_free(I_mat);
-  gsl_matrix_free(T);
-  // Note: 'aver' was not allocated, we used zscore_vec
-  // gsl_matrix_free(aver); 
-
-  gsl_matrix_partial_free(X);
-  gsl_matrix_partial_free(Y);
-  gsl_matrix_partial_free(beta);
-  // gsl_matrix_partial_free for se/zscore/pvalue is not needed as we didn't use structs for accumulators
+  gsl_matrix_free(I_mat); gsl_matrix_free(T);
+  gsl_matrix_partial_free(Xt); gsl_matrix_partial_free(Yt); gsl_matrix_partial_free(beta);
 }
+
+
+// .Call Interface (Required for Long Vectors)
+SEXP ridgeRegFast_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp, SEXP nrand_sexp, SEXP ncores_sexp) 
+{
+    // INPUTS ARE NOW UN-TRANSPOSED
+    SEXP x_dim = getAttrib(X_sexp, R_DimSymbol);
+    size_t n = (size_t)INTEGER(x_dim)[0]; // Genes
+    size_t p = (size_t)INTEGER(x_dim)[1]; // Proteins
+
+    SEXP y_dim = getAttrib(Y_sexp, R_DimSymbol);
+    // n from Y must match n from X
+    size_t m = (size_t)INTEGER(y_dim)[1]; // Samples
+    
+    R_xlen_t total_len = (R_xlen_t)p * (R_xlen_t)m;
+
+    SEXP beta_sexp   = PROTECT(allocVector(REALSXP, total_len));
+    SEXP se_sexp     = PROTECT(allocVector(REALSXP, total_len));
+    SEXP zscore_sexp = PROTECT(allocVector(REALSXP, total_len));
+    SEXP pvalue_sexp = PROTECT(allocVector(REALSXP, total_len));
+
+    ridgeRegFast_core(
+        REAL(X_sexp), REAL(Y_sexp), n, p, m,
+        asReal(lambda_sexp), asInteger(nrand_sexp),
+        REAL(beta_sexp), REAL(se_sexp), REAL(zscore_sexp), REAL(pvalue_sexp),
+        asInteger(ncores_sexp)
+    );
+
+    SEXP res_list = PROTECT(allocVector(VECSXP, 4));
+    SET_VECTOR_ELT(res_list, 0, beta_sexp);
+    SET_VECTOR_ELT(res_list, 1, se_sexp);
+    SET_VECTOR_ELT(res_list, 2, zscore_sexp);
+    SET_VECTOR_ELT(res_list, 3, pvalue_sexp);
+    
+    SEXP names = PROTECT(allocVector(STRSXP, 4));
+    SET_STRING_ELT(names, 0, mkChar("beta"));
+    SET_STRING_ELT(names, 1, mkChar("se"));
+    SET_STRING_ELT(names, 2, mkChar("zscore"));
+    SET_STRING_ELT(names, 3, mkChar("pvalue"));
+    setAttrib(res_list, R_NamesSymbol, names);
+
+    UNPROTECT(6);
+    return res_list;
+}
+
+// Registration
+static const R_CMethodDef cMethods[] = {
+    {"ridgeReg", (DL_FUNC) &ridgeReg, 11},
+    {NULL, NULL, 0}
+};
+
+static const R_CallMethodDef callMethods[] = {
+    {"ridgeRegFast_interface", (DL_FUNC) &ridgeRegFast_interface, 5},
+    {NULL, NULL, 0}
+};
+
+void R_init_SecAct(DllInfo *dll) {
+    R_registerRoutines(dll, cMethods, callMethods, NULL, NULL);
+    R_useDynamicSymbols(dll, FALSE);
+}
+
