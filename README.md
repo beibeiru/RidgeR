@@ -45,6 +45,8 @@ print(corr)
 ```
 
 ## Benchmark Results 
+The old function uses R’s .C interface, which is fundamentally limited because it passes data through 32-bit integer indexing. With 32-bit addressing, the maximum indexable memory is about 2–4 GB, and objects larger than this cannot be safely referenced. A dataset of size 20,000 × 1,000,000 elements far exceeds what 32-bit indexing can represent, so the .C version cannot handle it regardless of available RAM.
+In contrast, the new function uses .Call, which operates directly on R’s internal SEXP objects and supports 64-bit memory addressing. This allows indexing into very large arrays and enables the handling of datasets that exceed the 32-bit limit. As a result, .Call can process extremely large inputs—such as 20,000 × 1,000,000 matrices—while .C cannot.
 
 ### Time (Elapsed Time)
 - **User time** is the CPU time spent executing the function’s own computations. Multithreaded execution accumulates CPU time across cores, so it typically reports higher user time than a single-threaded run.
