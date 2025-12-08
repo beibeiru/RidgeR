@@ -82,7 +82,7 @@ print(corr)
 | 24 | 1000    | 375.39 / 0.22 / 376.48       | 523.67 / 1.14 / 72.75          |
 | 24 | 10000   | 3789.96 / 1.47 / 3805.26     | 7246.05 / 14.4 / 362.68        |
 | 24 | 100000  | 33074.19 / 23.68 / 33205.89  | 71557.8 / 248.73 / 3121.86     |
-| 24 | 1000000 | - / - / -                    | 1395025.23 / 950.12 / 60940.62 |
+| 24 | 1000000 | - / - / -                    | 744556.55 / 69.52 / 31889.90   |
 
 ### Memory (MaxRSS, GB)
 - MaxRSS (maximum Resident Set Size) is used because it captures the peak amount of physical memory a process occupies during its execution.
