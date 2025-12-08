@@ -35,7 +35,7 @@ SecAct.inference.gsl.old <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=100
 }
 
 #' @title Secreted protein activity inference (Optimized Version)
-#' @description Fast multi-threaded implementation using OpenMP.
+#' @description Fast multi-threaded implementation using OpenMP and .Call interface for large data.
 #' @param Y Gene expression matrix.
 #' @param SigMat Secreted protein signature matrix.
 #' @param lambda Penalty factor.
@@ -54,24 +54,35 @@ SecAct.inference.gsl.new <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=100
   olp <- intersect(row.names(Y),row.names(X))
   X <- as.matrix(X[olp,,drop=F])
   Y <- as.matrix(Y[olp,,drop=F])
-  X <- scale(X); Y <- scale(Y)
-  X[is.na(X)] <- 0; Y[is.na(Y)] <- 0
-
-  n <- length(olp); p <- ncol(X); m <- ncol(Y)
+  
+  # Standardize
+  X <- scale(X); X[is.na(X)] <- 0
+  Y <- scale(Y); Y[is.na(Y)] <- 0
 
   if(is.null(ncores)) {
     ncores <- parallel::detectCores(logical = FALSE)
   }
 
-  res <- .C("ridgeRegFast",
-            X=as.double(t(X)),
-            Y=as.double(t(Y)),
-            as.integer(n), as.integer(p), as.integer(m),
-            as.double(lambda), as.double(nrand),
-            beta=double(p*m), se=double(p*m), zscore=double(p*m), pvalue=double(p*m),
-            as.integer(ncores)
-  )
+  # --- CRITICAL Step ---
+  # Do NOT transpose Y. Passing raw matrix directly.
+  # The C code is updated to handle (Genes x Samples) layout directly.
+  
+  res <- .Call("ridgeRegFast_interface",
+               X, # Passed as (Genes x Proteins)
+               Y, # Passed as (Genes x Samples)
+               as.numeric(lambda),
+               as.integer(nrand),
+               as.integer(ncores))
 
-  formatter <- function(v) matrix(v, byrow=T, ncol=m, dimnames=list(colnames(X), colnames(Y)))
+  p <- ncol(X)
+  m <- ncol(Y)
+  
+  formatter <- function(v) {
+    dim(v) <- c(p, m)
+    rownames(v) <- colnames(X)
+    colnames(v) <- colnames(Y)
+    return(v)
+  }
+  
   list(beta=formatter(res$beta), se=formatter(res$se), zscore=formatter(res$zscore), pvalue=formatter(res$pvalue))
 }
