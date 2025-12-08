@@ -77,6 +77,7 @@ print(corr)
 | 24 | 1000000 | - / - / -                    | 1395025.23 / 950.12 / 60940.62 |
 
 ### Memory (MaxRSS, GB)
+MaxRSS (maximum Resident Set Size) is used because it captures the peak amount of physical memory a process occupies during its execution
 
 | Threads | Samples | Old  | New   |
 |:--:|:-------:|:-------:|:--------:|
