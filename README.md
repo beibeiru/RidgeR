@@ -45,8 +45,11 @@ print(corr)
 ```
 
 ## Benchmark Results 
-The old function uses R’s .C interface, which is fundamentally limited because it passes data through 32-bit integer indexing. With 32-bit addressing, the maximum indexable memory is about 2–4 GB, and objects larger than this cannot be safely referenced. A dataset of size 20,000 × 1,000,000 elements far exceeds what 32-bit indexing can represent, so the .C version cannot handle it regardless of available RAM.
-In contrast, the new function uses .Call, which operates directly on R’s internal SEXP objects and supports 64-bit memory addressing. This allows indexing into very large arrays and enables the handling of datasets that exceed the 32-bit limit. As a result, .Call can process extremely large inputs—such as 20,000 × 1,000,000 matrices—while .C cannot.
+- A 32-bit signed integer can index up to 2^31 − 1 = 2,147,483,647 ≈ 2.147 billion elements.
+- A 64-bit signed integer can index up to 2^63 − 1 = 9.22 × 10^18 elements (about 9.22 quintillion).
+- A dataset of 16,325 genes × 100,000 samples contains 1.63 billion elements, which is below the 32-bit limit, so it can be indexed with 32-bit integers (works with the .C interface in the old function).
+- A dataset of 16,325 genes × 1,000,000 samples contains 16.3 billion elements, which exceeds the 32-bit limit and therefore cannot be indexed with 32-bit integers (fails under the .C interface in the old function).
+- The same 16,325 × 1,000,000 dataset contains 16.3 billion elements, which is well within the 64-bit indexing range, so it can be indexed with 64-bit integers (works with the .Call interface in the new function).
 
 ### Time (Elapsed Time)
 - **User time** is the CPU time spent executing the function’s own computations. Multithreaded execution accumulates CPU time across cores, so it typically reports higher user time than a single-threaded run.
@@ -111,4 +114,3 @@ In contrast, the new function uses .Call, which operates directly on R’s inter
 | 24 | 10000   | 4.116   | 44.18    |
 | 24 | 100000  | 40.67   | 61.72    |
 | 24 | 1000000 | -       | 302.68   |
-
