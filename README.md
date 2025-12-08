@@ -46,7 +46,10 @@ print(corr)
 
 ## Benchmark Results 
 
-### Elapsed Time
+### Time (Elapsed Time)
+- **User time** is the CPU time spent executing the function’s own computations. Multithreaded execution accumulates CPU time across cores, so it typically reports higher user time than a single-threaded run.
+- **System time** is the CPU time the operating system uses to handle tasks on behalf of the process, such as memory allocation or file I/O.
+- **Elapsed time** (wall-clock time) is the total real-world time from start to finish as experienced by the user.
 
 | Threads | Samples | Old (user/sys/elapsed) | New (user/sys/elapsed) |
 |:--:|:-------:|:----------------------------:|:------------------------------:|
@@ -77,7 +80,7 @@ print(corr)
 | 24 | 1000000 | - / - / -                    | 1395025.23 / 950.12 / 60940.62 |
 
 ### Memory (MaxRSS, GB)
-MaxRSS (maximum Resident Set Size) is used because it captures the peak amount of physical memory a process occupies during its execution
+- MaxRSS (maximum Resident Set Size) is used because it captures the peak amount of physical memory a process occupies during its execution.
 
 | Threads | Samples | Old  | New   |
 |:--:|:-------:|:-------:|:--------:|
