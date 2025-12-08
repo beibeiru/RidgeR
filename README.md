@@ -49,7 +49,7 @@ print(corr)
 - A 64-bit signed integer can index up to 2^63 − 1 = 9.22 × 10^18 elements (about 9.22 quintillion).
 - A dataset of 16,325 genes × 100,000 samples contains 1.63 billion elements, which is below the 32-bit limit, so it can be indexed with 32-bit integers (works with the .C interface in the old function).
 - A dataset of 16,325 genes × 1,000,000 samples contains 16.3 billion elements, which exceeds the 32-bit limit and therefore cannot be indexed with 32-bit integers (fails under the .C interface in the old function).
-- The same 16,325 × 1,000,000 dataset contains 16.3 billion elements, which is well within the 64-bit indexing range, so it can be indexed with 64-bit integers (works with the .Call interface in the new function).
+- The same dataset (16,325 × 1,000,000) is well within the 64-bit indexing range, so it can be indexed with 64-bit integers (works with the .Call interface in the new function).
 
 ### Time (Elapsed Time)
 - **User time** is the CPU time spent executing the function’s own computations. Multithreaded execution accumulates CPU time across cores, so it typically reports higher user time than a single-threaded run.
