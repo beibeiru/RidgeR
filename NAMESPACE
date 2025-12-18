@@ -2,4 +2,4 @@
 
 export(SecAct.inference.gsl.new)
 export(SecAct.inference.gsl.old)
-useDynLib(ridgeR, .registration = TRUE)
+useDynLib(RidgeR, .registration = TRUE)
