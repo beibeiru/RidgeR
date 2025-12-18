@@ -24,5 +24,5 @@ SecAct.inference.gsl.new(
 \item{ncores}{Number of cores (default: all available).}
 }
 \description{
-Fast multi-threaded implementation using OpenMP.
+Fast multi-threaded implementation using OpenMP and .Call interface for large data.
 }

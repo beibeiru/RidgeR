@@ -54,19 +54,19 @@ SecAct.inference.gsl.new <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=100
   olp <- intersect(row.names(Y),row.names(X))
   X <- as.matrix(X[olp,,drop=F])
   Y <- as.matrix(Y[olp,,drop=F])
-  
+
   # Standardize
   X <- scale(X); X[is.na(X)] <- 0
   Y <- scale(Y); Y[is.na(Y)] <- 0
 
   if(is.null(ncores)) {
-    ncores <- parallel::detectCores(logical = FALSE)
+    ncores <- parallel::detectCores(logical = FALSE)-1
   }
 
   # --- CRITICAL Step ---
   # Do NOT transpose Y. Passing raw matrix directly.
   # The C code is updated to handle (Genes x Samples) layout directly.
-  
+
   res <- .Call("ridgeRegFast_interface",
                X, # Passed as (Genes x Proteins)
                Y, # Passed as (Genes x Samples)
@@ -76,13 +76,13 @@ SecAct.inference.gsl.new <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=100
 
   p <- ncol(X)
   m <- ncol(Y)
-  
+
   formatter <- function(v) {
     dim(v) <- c(p, m)
     rownames(v) <- colnames(X)
     colnames(v) <- colnames(Y)
     return(v)
   }
-  
+
   list(beta=formatter(res$beta), se=formatter(res$se), zscore=formatter(res$zscore), pvalue=formatter(res$pvalue))
 }

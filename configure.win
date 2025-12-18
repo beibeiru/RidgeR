@@ -40,12 +40,12 @@ EOF
 # 4. FINAL STATUS REPORT
 # ===========================================================================
 echo ""
-echo "------------------------------------------------------------------------"
-echo "  RidgeR Configuration Summary (Windows)"
-echo "------------------------------------------------------------------------"
+echo "-----------------------------------------"
+echo "  RidgeR Configuration Summary (Windows) "
+echo "-----------------------------------------"
 echo "  GSL Status:      $GSL_STATUS"
 echo "  OpenMP Status:   ENABLED"
 echo "  Execution Mode:  Multi-threaded"
 echo "  Compiler Flags:  $OMP_FLAGS"
-echo "------------------------------------------------------------------------"
+echo "-----------------------------------------"
 echo ""
