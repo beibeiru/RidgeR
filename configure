@@ -89,6 +89,11 @@ EOF
 
 if [ "$OS" = "Darwin" ]; then
     # --- macOS Specific Logic ---
+    
+    # Note: On macOS with Apple Clang + Homebrew libomp, there's a known conflict
+    # between R's Rinternals.h (#define match Rf_match) and omp.h's use of 'match'
+    # as an OpenMP 5.0+ keyword. We fix this by using -include omp.h to force
+    # omp.h to be processed BEFORE any R headers.
 
     # Case A: Homebrew LLVM Clang
     if echo "$R_CC" | grep -q "opt/homebrew/opt/llvm"; then
@@ -108,13 +113,15 @@ if [ "$OS" = "Darwin" ]; then
     else
         if [ -f "/opt/homebrew/opt/libomp/lib/libomp.dylib" ]; then
             # Apple Silicon
-            OMP_CFLAGS="-Xpreprocessor -fopenmp -I/opt/homebrew/opt/libomp/include"
+            # Use -include omp.h to force omp.h before R headers (fixes match macro conflict)
+            OMP_CFLAGS="-Xpreprocessor -fopenmp -I/opt/homebrew/opt/libomp/include -include omp.h"
             OMP_LIBS="/opt/homebrew/opt/libomp/lib/libomp.dylib -Wl,-rpath,/opt/homebrew/opt/libomp/lib"
             OVERRIDE_LDFLAGS="-L/opt/homebrew/opt/libomp/lib"
 
         elif [ -f "/usr/local/opt/libomp/lib/libomp.dylib" ]; then
             # Intel Mac
-            OMP_CFLAGS="-Xpreprocessor -fopenmp -I/usr/local/opt/libomp/include"
+            # Use -include omp.h to force omp.h before R headers (fixes match macro conflict)
+            OMP_CFLAGS="-Xpreprocessor -fopenmp -I/usr/local/opt/libomp/include -include omp.h"
             OMP_LIBS="/usr/local/opt/libomp/lib/libomp.dylib -Wl,-rpath,/usr/local/opt/libomp/lib"
             OVERRIDE_LDFLAGS="-L/usr/local/opt/libomp/lib"
         else
