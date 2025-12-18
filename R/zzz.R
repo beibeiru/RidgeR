@@ -1,2 +1,2 @@
-#' @useDynLib ridgeR, .registration = TRUE
+#' @useDynLib RidgeR, .registration = TRUE
 NULL
