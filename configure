@@ -89,7 +89,11 @@ if [ "$OS" = "Darwin" ]; then
 else
     # --- Linux Logic ---
     OMP_CFLAGS=$(R CMD config SHLIB_OPENMP_CFLAGS 2>/dev/null)
-    OMP_LIBS=$(R CMD config SHLIB_OPENMP_CFLAGS 2>/dev/null)
+    if [ -z "$OMP_CFLAGS" ]; then
+        # Fallback for GCC
+        OMP_CFLAGS="-fopenmp"
+    fi
+    OMP_LIBS="-fopenmp"
 fi
 
 # Clean up variables
