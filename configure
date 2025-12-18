@@ -40,7 +40,52 @@ OVERRIDE_LDFLAGS=""
 OS=$(uname -s)
 
 # Get the compiler R is configured to use
-R_CC=$(R CMD config CC)
+R_CC=$(R CMD config CC 2>/dev/null)
+if [ -z "$R_CC" ]; then
+    R_CC="gcc"
+fi
+
+# ---------------------------------------------------------------------------
+# Function to test if OpenMP actually works with given flags
+# ---------------------------------------------------------------------------
+test_openmp() {
+    TEST_CFLAGS="$1"
+    TEST_LIBS="$2"
+    
+    # Create a temporary directory
+    TMPDIR=$(mktemp -d 2>/dev/null || mktemp -d -t 'openmptest')
+    TESTFILE="$TMPDIR/test_omp.c"
+    TESTOUT="$TMPDIR/test_omp"
+    
+    # Write a simple OpenMP test program
+    cat > "$TESTFILE" <<EOF
+#include <omp.h>
+#include <stdio.h>
+int main() {
+    int nthreads = 0;
+    #pragma omp parallel
+    {
+        #pragma omp single
+        nthreads = omp_get_num_threads();
+    }
+    printf("%d\\n", nthreads);
+    return 0;
+}
+EOF
+    
+    # Try to compile
+    $R_CC $TEST_CFLAGS -o "$TESTOUT" "$TESTFILE" $TEST_LIBS 2>/dev/null
+    RESULT=$?
+    
+    # Clean up
+    rm -rf "$TMPDIR"
+    
+    return $RESULT
+}
+
+# ---------------------------------------------------------------------------
+# Platform-specific OpenMP detection
+# ---------------------------------------------------------------------------
 
 if [ "$OS" = "Darwin" ]; then
     # --- macOS Specific Logic ---
@@ -73,7 +118,7 @@ if [ "$OS" = "Darwin" ]; then
             OMP_LIBS="/usr/local/opt/libomp/lib/libomp.dylib -Wl,-rpath,/usr/local/opt/libomp/lib"
             OVERRIDE_LDFLAGS="-L/usr/local/opt/libomp/lib"
         else
-             # Fallback
+             # Fallback to R's config
              OMP_CFLAGS=$(R CMD config SHLIB_OPENMP_CFLAGS 2>/dev/null)
              OMP_LIBS=$(R CMD config SHLIB_OPENMP_CFLAGS 2>/dev/null)
         fi
@@ -88,15 +133,37 @@ if [ "$OS" = "Darwin" ]; then
 
 else
     # --- Linux Logic ---
-    OMP_CFLAGS=$(R CMD config SHLIB_OPENMP_CFLAGS 2>/dev/null)
-    if [ -z "$OMP_CFLAGS" ]; then
-        # Fallback for GCC
+    
+    # First, try R's built-in OpenMP flags
+    R_OMP_CFLAGS=$(R CMD config SHLIB_OPENMP_CFLAGS 2>/dev/null)
+    
+    # Clean up any error messages
+    case "$R_OMP_CFLAGS" in *ERROR*|*error*) R_OMP_CFLAGS="";; esac
+    
+    if [ -n "$R_OMP_CFLAGS" ] && test_openmp "$R_OMP_CFLAGS" "$R_OMP_CFLAGS"; then
+        # R's OpenMP flags work
+        OMP_CFLAGS="$R_OMP_CFLAGS"
+        OMP_LIBS="$R_OMP_CFLAGS"
+    elif test_openmp "-fopenmp" "-fopenmp"; then
+        # Standard GCC OpenMP flags work
         OMP_CFLAGS="-fopenmp"
+        OMP_LIBS="-fopenmp"
+    elif test_openmp "-fopenmp" "-lgomp"; then
+        # GCC with explicit libgomp
+        OMP_CFLAGS="-fopenmp"
+        OMP_LIBS="-lgomp"
+    elif test_openmp "-qopenmp" "-qopenmp"; then
+        # Intel compiler
+        OMP_CFLAGS="-qopenmp"
+        OMP_LIBS="-qopenmp"
+    else
+        # OpenMP not available
+        OMP_CFLAGS=""
+        OMP_LIBS=""
     fi
-    OMP_LIBS="-fopenmp"
 fi
 
-# Clean up variables
+# Clean up variables (additional safety check)
 case "$OMP_CFLAGS" in *ERROR*) OMP_CFLAGS="";; esac
 case "$OMP_LIBS" in *ERROR*) OMP_LIBS="";; esac
 
@@ -133,10 +200,11 @@ if [ -n "$OMP_CFLAGS" ]; then
     echo "  OpenMP Status:   ENABLED"
     echo "  Execution Mode:  Multi-threaded"
     echo "  Compiler Flags:  $OMP_CFLAGS"
+    echo "  Linker Flags:    $OMP_LIBS"
 else
     echo "  OpenMP Status:   DISABLED"
     echo "  Execution Mode:  Single-threaded"
-    echo "                   (libomp not found or compiler incompatible)"
+    echo "                   (OpenMP not available or compiler incompatible)"
 fi
 
 if [ -n "$CONFLICT_MSG" ]; then
