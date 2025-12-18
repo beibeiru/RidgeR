@@ -1,7 +1,7 @@
+
 <!-- README.md is generated from README.Rmd. Please edit that file -->
 
-# SecAct: Secreted Protein Activity Inference
-
+# RidgeR: Ridge Regression with Significance Testing
 ## Installation
 
 To install `RidgeR`, we recommend using `devtools`:
