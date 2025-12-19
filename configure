@@ -3,13 +3,9 @@
 # ===========================================================================
 # 1. GSL DETECTION
 # ===========================================================================
-echo ""
 echo "Checking for GSL..."
 
-# Define potential locations for gsl-config on macOS/Linux
 GSL_CONFIG_EXEC="gsl-config"
-
-# If not in PATH, look in standard Homebrew/MacPorts locations
 if ! command -v "$GSL_CONFIG_EXEC" >/dev/null 2>&1; then
     if [ -x "/opt/homebrew/bin/gsl-config" ]; then
         GSL_CONFIG_EXEC="/opt/homebrew/bin/gsl-config"
@@ -20,7 +16,6 @@ if ! command -v "$GSL_CONFIG_EXEC" >/dev/null 2>&1; then
     fi
 fi
 
-# Final check: Can we execute it?
 if ! "$GSL_CONFIG_EXEC" --version >/dev/null 2>&1; then
     echo "ERROR: GSL is not installed or gsl-config is not found."
     exit 1
@@ -30,7 +25,7 @@ GSL_CFLAGS=$("$GSL_CONFIG_EXEC" --cflags)
 GSL_LIBS=$("$GSL_CONFIG_EXEC" --libs)
 
 # ===========================================================================
-# 2. COMPILER & OPENMP DETECTION
+# 2. OPENMP DETECTION HELPERS
 # ===========================================================================
 echo "Checking for OpenMP support..."
 
@@ -38,144 +33,117 @@ OMP_CFLAGS=""
 OMP_LIBS=""
 OVERRIDE_LDFLAGS=""
 OS=$(uname -s)
-
-# Get the compiler R is configured to use
 R_CC=$(R CMD config CC 2>/dev/null)
-if [ -z "$R_CC" ]; then
-    R_CC="gcc"
-fi
+[ -z "$R_CC" ] && R_CC="gcc"
 
-# ---------------------------------------------------------------------------
-# Function to test if OpenMP actually works with given flags
-# ---------------------------------------------------------------------------
+# Function to compile and link a tiny OpenMP program
 test_openmp() {
     TEST_CFLAGS="$1"
     TEST_LIBS="$2"
-    
-    # Create a temporary directory
     TMPDIR=$(mktemp -d 2>/dev/null || mktemp -d -t 'openmptest')
     TESTFILE="$TMPDIR/test_omp.c"
     TESTOUT="$TMPDIR/test_omp"
     
-    # Write a simple OpenMP test program
     cat > "$TESTFILE" <<EOF
 #include <omp.h>
 #include <stdio.h>
 int main() {
-    int nthreads = 0;
     #pragma omp parallel
-    {
-        #pragma omp single
-        nthreads = omp_get_num_threads();
-    }
-    printf("%d\\n", nthreads);
+    { }
     return 0;
 }
 EOF
     
-    # Try to compile
-    $R_CC $TEST_CFLAGS -o "$TESTOUT" "$TESTFILE" $TEST_LIBS 2>/dev/null
+    # Try to compile AND link
+    "$R_CC" $TEST_CFLAGS -o "$TESTOUT" "$TESTFILE" $TEST_LIBS >/dev/null 2>&1
     RESULT=$?
     
-    # Clean up
     rm -rf "$TMPDIR"
-    
     return $RESULT
 }
 
-# ---------------------------------------------------------------------------
-# Platform-specific OpenMP detection
-# ---------------------------------------------------------------------------
+# ===========================================================================
+# 3. PLATFORM SPECIFIC DETECTION
+# ===========================================================================
 
 if [ "$OS" = "Darwin" ]; then
-    # --- macOS Specific Logic ---
+    # --- macOS Logic ---
     
-    # Note: On macOS with Apple Clang + Homebrew libomp, there's a known conflict
-    # between R's Rinternals.h (#define match Rf_match) and omp.h's use of 'match'
-    # as an OpenMP 5.0+ keyword. We fix this by using -include omp.h to force
-    # omp.h to be processed BEFORE any R headers.
+    # 1. Define Candidate Configurations
+    # We define candidates as "CFLAGS|LIBS|LDFLAGS_OVERRIDE"
+    
+    # Candidate A: Homebrew Apple Silicon
+    CAND_A_CFLAGS="-Xpreprocessor -fopenmp -I/opt/homebrew/opt/libomp/include -include omp.h"
+    CAND_A_LIBS="/opt/homebrew/opt/libomp/lib/libomp.dylib -Wl,-rpath,/opt/homebrew/opt/libomp/lib"
+    CAND_A_LDFLAGS="-L/opt/homebrew/opt/libomp/lib"
 
-    # Case A: Homebrew LLVM Clang
-    if echo "$R_CC" | grep -q "opt/homebrew/opt/llvm"; then
-        LLVM_LIB="/opt/homebrew/opt/llvm/lib"
-        if [ -d "$LLVM_LIB" ]; then
-            OMP_CFLAGS="-fopenmp -I/opt/homebrew/opt/llvm/include"
-            OMP_LIBS="$LLVM_LIB/libomp.dylib -Wl,-rpath,$LLVM_LIB"
-            OVERRIDE_LDFLAGS="-L$LLVM_LIB"
-        fi
+    # Candidate B: Homebrew Intel
+    CAND_B_CFLAGS="-Xpreprocessor -fopenmp -I/usr/local/opt/libomp/include -include omp.h"
+    CAND_B_LIBS="/usr/local/opt/libomp/lib/libomp.dylib -Wl,-rpath,/usr/local/opt/libomp/lib"
+    CAND_B_LDFLAGS="-L/usr/local/opt/libomp/lib"
 
-    # Case B: MacPorts LLVM
-    elif echo "$R_CC" | grep -q "opt/local/bin"; then
-        OMP_CFLAGS="-fopenmp"
-        OMP_LIBS="-lomp"
+    # Candidate C: Homebrew LLVM (if user changed compiler)
+    CAND_C_CFLAGS="-fopenmp -I/opt/homebrew/opt/llvm/include"
+    CAND_C_LIBS="/opt/homebrew/opt/llvm/lib/libomp.dylib -Wl,-rpath,/opt/homebrew/opt/llvm/lib"
+    CAND_C_LDFLAGS="-L/opt/homebrew/opt/llvm/lib"
 
-    # Case C: Standard Apple Clang (Xcode) using Homebrew libomp
+    # 2. Test Candidates
+    # We actually try to compile with them. If it works, we use it.
+    
+    if test_openmp "$CAND_A_CFLAGS" "$CAND_A_LIBS"; then
+        echo "  Detected OpenMP: Homebrew (Apple Silicon)"
+        OMP_CFLAGS="$CAND_A_CFLAGS"
+        OMP_LIBS="$CAND_A_LIBS"
+        OVERRIDE_LDFLAGS="$CAND_A_LDFLAGS"
+        
+    elif test_openmp "$CAND_B_CFLAGS" "$CAND_B_LIBS"; then
+        echo "  Detected OpenMP: Homebrew (Intel)"
+        OMP_CFLAGS="$CAND_B_CFLAGS"
+        OMP_LIBS="$CAND_B_LIBS"
+        OVERRIDE_LDFLAGS="$CAND_B_LDFLAGS"
+        
+    elif test_openmp "$CAND_C_CFLAGS" "$CAND_C_LIBS"; then
+        echo "  Detected OpenMP: Homebrew LLVM"
+        OMP_CFLAGS="$CAND_C_CFLAGS"
+        OMP_LIBS="$CAND_C_LIBS"
+        OVERRIDE_LDFLAGS="$CAND_C_LDFLAGS"
+        
     else
-        if [ -f "/opt/homebrew/opt/libomp/lib/libomp.dylib" ]; then
-            # Apple Silicon
-            # Use -include omp.h to force omp.h before R headers (fixes match macro conflict)
-            OMP_CFLAGS="-Xpreprocessor -fopenmp -I/opt/homebrew/opt/libomp/include -include omp.h"
-            OMP_LIBS="/opt/homebrew/opt/libomp/lib/libomp.dylib -Wl,-rpath,/opt/homebrew/opt/libomp/lib"
-            OVERRIDE_LDFLAGS="-L/opt/homebrew/opt/libomp/lib"
-
-        elif [ -f "/usr/local/opt/libomp/lib/libomp.dylib" ]; then
-            # Intel Mac
-            # Use -include omp.h to force omp.h before R headers (fixes match macro conflict)
-            OMP_CFLAGS="-Xpreprocessor -fopenmp -I/usr/local/opt/libomp/include -include omp.h"
-            OMP_LIBS="/usr/local/opt/libomp/lib/libomp.dylib -Wl,-rpath,/usr/local/opt/libomp/lib"
-            OVERRIDE_LDFLAGS="-L/usr/local/opt/libomp/lib"
-        else
-             # Fallback to R's config
-             OMP_CFLAGS=$(R CMD config SHLIB_OPENMP_CFLAGS 2>/dev/null)
-             OMP_LIBS=$(R CMD config SHLIB_OPENMP_CFLAGS 2>/dev/null)
+        # Fallback to R defaults
+        R_DEF_CFLAGS=$(R CMD config SHLIB_OPENMP_CFLAGS 2>/dev/null)
+        if [ -n "$R_DEF_CFLAGS" ] && test_openmp "$R_DEF_CFLAGS" "$R_DEF_CFLAGS"; then
+             echo "  Detected OpenMP: R Defaults"
+             OMP_CFLAGS="$R_DEF_CFLAGS"
+             OMP_LIBS="$R_DEF_CFLAGS"
         fi
     fi
-
+    
     # Check for ~/.R/Makevars conflict
     if [ -f "$HOME/.R/Makevars" ]; then
         if grep -q "usr/local.*omp\|lomp" "$HOME/.R/Makevars" 2>/dev/null; then
-            CONFLICT_MSG="WARNING: ~/.R/Makevars may conflict with build flags."
+            CONFLICT_MSG="WARNING: ~/.R/Makevars might override these settings and break OpenMP."
         fi
     fi
 
 else
     # --- Linux Logic ---
-    
-    # First, try R's built-in OpenMP flags
     R_OMP_CFLAGS=$(R CMD config SHLIB_OPENMP_CFLAGS 2>/dev/null)
-    
-    # Clean up any error messages
     case "$R_OMP_CFLAGS" in *ERROR*|*error*) R_OMP_CFLAGS="";; esac
     
     if [ -n "$R_OMP_CFLAGS" ] && test_openmp "$R_OMP_CFLAGS" "$R_OMP_CFLAGS"; then
-        # R's OpenMP flags work
         OMP_CFLAGS="$R_OMP_CFLAGS"
         OMP_LIBS="$R_OMP_CFLAGS"
     elif test_openmp "-fopenmp" "-fopenmp"; then
-        # Standard GCC OpenMP flags work
         OMP_CFLAGS="-fopenmp"
         OMP_LIBS="-fopenmp"
     elif test_openmp "-fopenmp" "-lgomp"; then
-        # GCC with explicit libgomp
         OMP_CFLAGS="-fopenmp"
         OMP_LIBS="-lgomp"
-    elif test_openmp "-qopenmp" "-qopenmp"; then
-        # Intel compiler
-        OMP_CFLAGS="-qopenmp"
-        OMP_LIBS="-qopenmp"
-    else
-        # OpenMP not available
-        OMP_CFLAGS=""
-        OMP_LIBS=""
     fi
 fi
 
-# Clean up variables (additional safety check)
-case "$OMP_CFLAGS" in *ERROR*) OMP_CFLAGS="";; esac
-case "$OMP_LIBS" in *ERROR*) OMP_LIBS="";; esac
-
 # ===========================================================================
-# 3. WRITE MAKEVARS
+# 4. WRITE MAKEVARS
 # ===========================================================================
 mkdir -p src
 
@@ -194,9 +162,8 @@ EOF
 fi
 
 # ===========================================================================
-# 4. FINAL STATUS REPORT
+# 5. STATUS REPORT
 # ===========================================================================
-
 echo ""
 echo "-------------------------------"
 echo "  RidgeR Configuration Summary "
@@ -211,13 +178,12 @@ if [ -n "$OMP_CFLAGS" ]; then
 else
     echo "  OpenMP Status:   DISABLED"
     echo "  Execution Mode:  Single-threaded"
-    echo "                   (OpenMP not available or compiler incompatible)"
+    echo "                   (Compiler rejected OpenMP flags)"
 fi
 
 if [ -n "$CONFLICT_MSG" ]; then
     echo ""
     echo "  $CONFLICT_MSG"
 fi
-
 echo "-------------------------------"
 echo ""
