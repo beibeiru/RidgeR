@@ -59,13 +59,13 @@ int main() {
 }
 EOF
     
-    # Attempt compilation and capture errors
-    "$R_CC" $TEST_CFLAGS -o "$TESTOUT" "$TESTFILE" $TEST_LIBS > "$ERRLOG" 2>&1
+    # --- FIX IS HERE: Removed quotes around $R_CC ---
+    $R_CC $TEST_CFLAGS -o "$TESTOUT" "$TESTFILE" $TEST_LIBS > "$ERRLOG" 2>&1
     RESULT=$?
     
     if [ $RESULT -ne 0 ]; then
         echo "  [Debug] $LABEL check failed. Compiler output:"
-        sed 's/^/    /' "$ERRLOG" # Indent error log
+        sed 's/^/    /' "$ERRLOG"
     fi
     
     rm -rf "$TMPDIR"
@@ -82,13 +82,13 @@ if [ "$OS" = "Darwin" ]; then
     # 1. Define Candidates
     
     # Candidate A: Homebrew Apple Silicon
-    # Note: We do NOT use -include omp.h here for the test, only for the final build
-    CAND_A_CFLAGS="-Xpreprocessor -fopenmp -I/opt/homebrew/opt/libomp/include"
+    # Important: We MUST use -include omp.h in the test to prevent 'match' macro conflict
+    CAND_A_CFLAGS="-Xpreprocessor -fopenmp -I/opt/homebrew/opt/libomp/include -include omp.h"
     CAND_A_LIBS="/opt/homebrew/opt/libomp/lib/libomp.dylib" 
     CAND_A_LDFLAGS="-L/opt/homebrew/opt/libomp/lib"
 
     # Candidate B: Homebrew Intel
-    CAND_B_CFLAGS="-Xpreprocessor -fopenmp -I/usr/local/opt/libomp/include"
+    CAND_B_CFLAGS="-Xpreprocessor -fopenmp -I/usr/local/opt/libomp/include -include omp.h"
     CAND_B_LIBS="/usr/local/opt/libomp/lib/libomp.dylib"
     CAND_B_LDFLAGS="-L/usr/local/opt/libomp/lib"
 
@@ -101,15 +101,13 @@ if [ "$OS" = "Darwin" ]; then
     
     if test_openmp "$CAND_A_CFLAGS" "$CAND_A_LIBS" "Apple Silicon"; then
         echo "  Detected OpenMP: Homebrew (Apple Silicon)"
-        # We add -include omp.h for the actual build to fix the R conflict
-        OMP_CFLAGS="$CAND_A_CFLAGS -include omp.h"
-        # We add rpath for the actual build
+        OMP_CFLAGS="$CAND_A_CFLAGS"
         OMP_LIBS="$CAND_A_LIBS -Wl,-rpath,/opt/homebrew/opt/libomp/lib"
         OVERRIDE_LDFLAGS="$CAND_A_LDFLAGS"
         
     elif test_openmp "$CAND_B_CFLAGS" "$CAND_B_LIBS" "Intel Mac"; then
         echo "  Detected OpenMP: Homebrew (Intel)"
-        OMP_CFLAGS="$CAND_B_CFLAGS -include omp.h"
+        OMP_CFLAGS="$CAND_B_CFLAGS"
         OMP_LIBS="$CAND_B_LIBS -Wl,-rpath,/usr/local/opt/libomp/lib"
         OVERRIDE_LDFLAGS="$CAND_B_LDFLAGS"
         
@@ -124,6 +122,9 @@ if [ "$OS" = "Darwin" ]; then
         R_DEF_CFLAGS=$(R CMD config SHLIB_OPENMP_CFLAGS 2>/dev/null)
         if [ -n "$R_DEF_CFLAGS" ]; then
              echo "  Trying R Defaults ($R_DEF_CFLAGS)..."
+             # Also assume we need -include omp.h for standard R flags on Mac to be safe
+             R_DEF_CFLAGS="$R_DEF_CFLAGS -include omp.h"
+             
              if test_openmp "$R_DEF_CFLAGS" "$R_DEF_CFLAGS" "R-Defaults"; then
                  echo "  Detected OpenMP: R Defaults"
                  OMP_CFLAGS="$R_DEF_CFLAGS"
