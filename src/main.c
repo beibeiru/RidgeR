@@ -152,6 +152,120 @@ void ridgeReg(
 }
 
 /* =========================================================
+   VERSION 1.5: SINGLE THREADED T-PERM (Cache Optimized)
+   Used by: SecAct.inference.gsl.old2
+   ========================================================= */
+void ridgeRegTperm_single(
+  double *X_vec, double *Y_vec,
+  int *n_pt, int *p_pt, int *m_pt,
+  double *lambda_pt, double *nrand_pt,
+  double *beta_vec, double *se_vec, double *zscore_vec, double *pvalue_vec
+)
+{
+  int n = *n_pt;
+  int p = *p_pt;
+  int m = *m_pt;
+  int nrand = (int)*nrand_pt;
+  double lambda = *lambda_pt;
+
+  // Matrix views (using the "Transposed view" trick for correct math)
+  // Xt: (p x n) view of column-major X
+  gsl_matrix *Xt = RVectorObject_to_gsl_matrix(X_vec, p, n);
+  // Yt: (m x n) view of column-major Y
+  gsl_matrix *Yt = RVectorObject_to_gsl_matrix(Y_vec, m, n);
+  // beta: (p x m)
+  gsl_matrix *beta = RVectorObject_to_gsl_matrix(beta_vec, p, m);
+
+  gsl_matrix *I_mat = gsl_matrix_alloc(p, p);
+  gsl_matrix *T = gsl_matrix_alloc(p, n);
+
+  // T = (X'X + lambda*I)^-1 * X'
+  gsl_matrix_set_identity(I_mat);
+  gsl_blas_dsyrk(CblasLower, CblasNoTrans, 1.0, Xt, lambda, I_mat);
+  gsl_linalg_cholesky_decomp(I_mat);
+  gsl_linalg_cholesky_invert(I_mat);
+  gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, I_mat, Xt, 0.0, T);
+
+  // Observed beta = T * Y
+  // Math: beta = T @ Y
+  // GSL:  beta = T @ Yt^T
+  gsl_blas_dgemm(CblasNoTrans, CblasTrans, 1.0, T, Yt, 0.0, beta);
+
+  // --- PREPARE FOR CACHE-EFFICIENT PERMUTATION ---
+  // Create T^T (n x p). GSL stores Row-Major.
+  gsl_matrix *Tt_orig = gsl_matrix_alloc(n, p);
+  gsl_matrix_transpose_memcpy(Tt_orig, T);
+
+  gsl_matrix *Tt_perm = gsl_matrix_alloc(n, p);
+  gsl_matrix *beta_rand = gsl_matrix_alloc(p, m);
+
+  int *p_idx = (int*)malloc(n * sizeof(int));
+  for(int k=0; k<n; k++) p_idx[k] = k;
+
+  // Helpers for memcpy
+  double *src_base = Tt_orig->data;
+  double *dst_base = Tt_perm->data;
+  size_t row_size_bytes = p * sizeof(double);
+
+  // Initialize Statistics
+  size_t total_elements = (size_t)p * m;
+  for(size_t i=0; i<total_elements; i++) {
+    pvalue_vec[i] = 0.0;
+    se_vec[i] = 0.0;
+    zscore_vec[i] = 0.0;
+  }
+
+  srand(0);
+
+  for(int i_rand=0; i_rand<nrand; i_rand++)
+  {
+    shuffle(p_idx, n);
+
+    // Optimized Permutation: Row-wise memcpy on T^T
+    for(int r=0; r<n; r++) {
+       memcpy(dst_base + (r * p), 
+              src_base + (p_idx[r] * p), 
+              row_size_bytes);
+    }
+
+    // beta_rand = T_perm @ Y
+    //           = (Tt_perm)^T @ Yt^T
+    gsl_blas_dgemm(CblasTrans, CblasTrans, 1.0, Tt_perm, Yt, 0.0, beta_rand);
+
+    // Accumulate
+    for(size_t k=0; k<total_elements; k++) {
+      double b_rnd = beta_rand->data[k];
+      double b_obs = beta_vec[k];
+
+      if(fabs(b_rnd) >= fabs(b_obs)) pvalue_vec[k] += 1.0;
+      zscore_vec[k] += b_rnd;
+      se_vec[k] += b_rnd * b_rnd;
+    }
+  }
+
+  // Finalize Statistics
+  double inv_nrand = 1.0 / nrand;
+  for(size_t i=0; i<total_elements; i++) {
+    pvalue_vec[i] = (pvalue_vec[i] + 1.0) / (nrand + 1.0);
+    double mean_rand = zscore_vec[i] * inv_nrand;
+    double var_rand = (se_vec[i] * inv_nrand) - (mean_rand * mean_rand);
+    double se_rand = sqrt(var_rand > 0 ? var_rand : 0);
+    se_vec[i] = se_rand;
+    zscore_vec[i] = (se_rand > 1e-12) ? (beta_vec[i] - mean_rand) / se_rand : 0.0;
+  }
+
+  free(p_idx);
+  gsl_matrix_free(Tt_orig);
+  gsl_matrix_free(Tt_perm);
+  gsl_matrix_free(beta_rand);
+  gsl_matrix_free(I_mat);
+  gsl_matrix_free(T);
+  gsl_matrix_partial_free(Xt);
+  gsl_matrix_partial_free(Yt);
+  gsl_matrix_partial_free(beta);
+}
+
+/* =========================================================
    VERSION 2: OPTIMIZED (Multi-threaded, Y row permutation with blocking)
    Used by: SecAct.inference.gsl.new
    ========================================================= */
@@ -329,8 +443,6 @@ SEXP ridgeRegFast_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp, SEXP nra
 /* =========================================================
    VERSION 3: T COLUMN PERMUTATION (Multi-threaded)
    Used by: SecAct.inference.gsl.new2
-   
-   UPDATED: Now uses Cache-Efficient Row Permutation via Transpose
    ========================================================= */
 
 void ridgeRegTperm_core(
@@ -366,10 +478,7 @@ void ridgeRegTperm_core(
   gsl_blas_dgemm(CblasNoTrans, CblasTrans, 1.0, T, Yt, 0.0, beta);
 
   // --- PREPARE FOR CACHE-EFFICIENT PERMUTATION ---
-  
   // Create T^T (n x p). GSL stores Row-Major.
-  // Permuting columns of T is equivalent to permuting ROWS of T^T.
-  // Permuting rows of Row-Major matrix is fast (memcpy).
   gsl_matrix *Tt_orig = gsl_matrix_alloc(n, p);
   gsl_matrix_transpose_memcpy(Tt_orig, T);
 
@@ -445,12 +554,7 @@ void ridgeRegTperm_core(
                row_size_bytes);
       }
 
-      // Compute beta_rand
-      // Original: T[:, perm] @ Y
-      // Transposed formulation: (Tt_perm)^T @ (Yt)^T
-      // Tt_perm is n x p. op(A)=Trans -> p x n
-      // Yt is m x n.      op(B)=Trans -> n x m
-      // Result -> p x m
+      // beta_rand = (Tt_perm)^T @ (Yt)^T
       gsl_blas_dgemm(CblasTrans, CblasTrans, 1.0, Tt_perm, Yt, 0.0, beta_rand);
 
       // Accumulate
@@ -559,6 +663,7 @@ SEXP ridgeRegTperm_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp, SEXP nr
 
 static const R_CMethodDef cMethods[] = {
   {"ridgeReg", (DL_FUNC) &ridgeReg, 11},
+  {"ridgeRegTperm_single", (DL_FUNC) &ridgeRegTperm_single, 11},
   {NULL, NULL, 0}
 };
 
