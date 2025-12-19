@@ -14,6 +14,7 @@
 #endif
 
 // --- TUNING ---
+// 64 is efficient for cache lines and vectorization
 #define SAMPLE_STRIP_SIZE 64 
 #define PERM_BATCH_SIZE 64
 
@@ -62,7 +63,6 @@ void ridgeReg(
   double *lambda_pt, double *nrand_pt,
   double *beta_vec, double *se_vec, double *zscore_vec, double *pvalue_vec
 ) {
-  // Legacy code kept exactly as is for reference
   gsl_matrix *X = RVectorObject_to_gsl_matrix(X_vec, *n_pt, *p_pt);
   gsl_matrix *Y = RVectorObject_to_gsl_matrix(Y_vec, *n_pt, *m_pt);
   gsl_matrix *beta = RVectorObject_to_gsl_matrix(beta_vec, *p_pt, *m_pt);
@@ -180,12 +180,11 @@ void ridgeRegFast_core(
   // 4. Batched Parallel Execution
   #pragma omp parallel
   {
-    // OPTIMIZATION: We allocate transposed blocks to allow SEQUENTIAL writes.
-    // Dimensions: (Samples_in_batch * Perms) x (Genes n)
-    // This makes the fill loop extremely fast (memcpy friendly)
+    // OPTIMIZATION: Transposed blocks for SEQUENTIAL memory writes
+    // Y_block_T: (BatchSize x n)
     gsl_matrix *Y_block_T = gsl_matrix_alloc(SAMPLE_STRIP_SIZE * PERM_BATCH_SIZE, n);
     
-    // Result of Y_block_T * T_trans -> (Samples * Perms) x (Proteins p)
+    // Beta_block_T: (BatchSize x p)
     gsl_matrix *Beta_block_T = gsl_matrix_alloc(SAMPLE_STRIP_SIZE * PERM_BATCH_SIZE, p);
     
     // Iterate over Samples
@@ -200,25 +199,20 @@ void ridgeRegFast_core(
         int current_perms = (b_start + PERM_BATCH_SIZE > nrand) ? (nrand - b_start) : PERM_BATCH_SIZE;
         size_t total_rows = current_perms * current_samples;
 
-        // A. Construct Transposed Block (Row-by-Row Filling = Fast!)
-        // Loop structure: For each perm, for each sample -> create a row in Y_block_T
+        // A. Construct Transposed Block
+        // We write to Y_block_T sequentially (Row-by-Row). Cache Friendly.
         for(int i_perm = 0; i_perm < current_perms; i_perm++) {
            int *p_idx = &perm_table[(size_t)(b_start + i_perm) * n];
            
            for(size_t s_local = 0; s_local < current_samples; s_local++) {
              
-             // Row index in Y_block_T
              size_t dest_row_idx = (i_perm * current_samples) + s_local;
              
-             // Source row from Yt (global data)
              size_t global_samp_idx = samp_start + s_local;
              double *src_row = gsl_matrix_ptr(Yt, global_samp_idx, 0);
              
-             // Pointer to destination row
              double *dest_ptr = gsl_matrix_ptr(Y_block_T, dest_row_idx, 0);
              
-             // Core loop: Permute genes
-             // Because we write to dest_ptr sequentially [0..n], this is cache friendly.
              for(size_t gene = 0; gene < n; gene++) {
                dest_ptr[gene] = src_row[ p_idx[gene] ];
              }
@@ -226,11 +220,7 @@ void ridgeRegFast_core(
         }
 
         // B. Matrix Multiply: Beta^T = Y^T * T^T
-        // Y_block_T is (Batch x n)
-        // T is (p x n). We need T^T (n x p).
-        // Using GSL: C = A * B^T  => Y_block_T * T^T
         // Result is (Batch x p)
-        
         gsl_matrix_view Y_sub = gsl_matrix_submatrix(Y_block_T, 0, 0, total_rows, n);
         gsl_matrix_view B_sub = gsl_matrix_submatrix(Beta_block_T, 0, 0, total_rows, p);
         
@@ -238,23 +228,13 @@ void ridgeRegFast_core(
         gsl_blas_dgemm(CblasNoTrans, CblasTrans, 1.0, &Y_sub.matrix, T, 0.0, &B_sub.matrix);
 
         // C. Update Stats
-        // Beta_block_T is (Samples*Perms) rows x (Proteins) cols
         for(int i_perm = 0; i_perm < current_perms; i_perm++) {
           for(size_t s_local = 0; s_local < current_samples; s_local++) {
             
             size_t block_row = (i_perm * current_samples) + s_local;
             double *beta_vals = gsl_matrix_ptr(&B_sub.matrix, block_row, 0);
             
-            R_xlen_t global_idx_base = (R_xlen_t)(samp_start + s_local); // Base for (r=0)
-            
             for(size_t r = 0; r < p; r++) {
-              // In Beta_vec (Column Major p x m), stride is m? 
-              // No, Beta_vec was passed as p x m.
-              // Wait, RVectorObject_to_gsl_matrix(beta_vec, p, m) means:
-              // element (r, sample) is at index: r * m + sample ?? 
-              // GSL is row major: index = r * tda + sample.
-              // YES. beta_vec is p*m.
-              
               R_xlen_t global_idx = (R_xlen_t)r * m + (samp_start + s_local);
               
               double b_rnd = beta_vals[r];
