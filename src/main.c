@@ -556,7 +556,7 @@ static const R_CallMethodDef callMethods[] = {
   {NULL, NULL, 0}
 };
 
-void R_init_SecAct(DllInfo *dll) {
+void R_init_RidgeR(DllInfo *dll) {
   R_registerRoutines(dll, cMethods, callMethods, NULL, NULL);
   R_useDynamicSymbols(dll, FALSE);
 }
