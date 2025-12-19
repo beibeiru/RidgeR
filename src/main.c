@@ -330,13 +330,7 @@ SEXP ridgeRegFast_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp, SEXP nra
    VERSION 3: T COLUMN PERMUTATION (Multi-threaded)
    Used by: SecAct.inference.gsl.new2
    
-   This method permutes columns of T instead of rows of Y.
-   Mathematically equivalent: T @ Y[perm,:] == T[:,perm] @ Y
-   
-   Advantages:
-   - T is typically smaller than Y (when m >> p)
-   - Simpler memory access pattern
-   - Better cache utilization for large sample counts
+   UPDATED: Now uses Cache-Efficient Row Permutation via Transpose
    ========================================================= */
 
 void ridgeRegTperm_core(
@@ -353,9 +347,9 @@ void ridgeRegTperm_core(
     #endif
   }
 
-  // Matrix views (same as ridgeRegFast)
+  // Matrix views
   gsl_matrix *Xt = RVectorObject_to_gsl_matrix(X_ptr, p, n);  // t(X): p x n
-  gsl_matrix *Yt = RVectorObject_to_gsl_matrix(Y_ptr, m, n);  // t(Y): m x n
+  gsl_matrix *Yt = RVectorObject_to_gsl_matrix(Y_ptr, m, n);  // t(Y): m x n (GSL view of Col-Major R matrix)
   gsl_matrix *beta = RVectorObject_to_gsl_matrix(beta_vec, p, m);
 
   gsl_matrix *I_mat = gsl_matrix_alloc(p, p);
@@ -371,6 +365,14 @@ void ridgeRegTperm_core(
   // Observed beta = T @ Y (= T @ Yt^T in our view)
   gsl_blas_dgemm(CblasNoTrans, CblasTrans, 1.0, T, Yt, 0.0, beta);
 
+  // --- PREPARE FOR CACHE-EFFICIENT PERMUTATION ---
+  
+  // Create T^T (n x p). GSL stores Row-Major.
+  // Permuting columns of T is equivalent to permuting ROWS of T^T.
+  // Permuting rows of Row-Major matrix is fast (memcpy).
+  gsl_matrix *Tt_orig = gsl_matrix_alloc(n, p);
+  gsl_matrix_transpose_memcpy(Tt_orig, T);
+
   // Pre-generate all permutation indices
   int *perm_table = (int*)malloc((size_t)nrand * n * sizeof(int));
   int *temp_idx = (int*)malloc(n * sizeof(int));
@@ -385,7 +387,7 @@ void ridgeRegTperm_core(
 
   R_xlen_t total_elements = (R_xlen_t)p * (R_xlen_t)m;
 
-  // Initialize accumulators to zero
+  // Initialize accumulators
   #pragma omp parallel for schedule(static)
   for(R_xlen_t i = 0; i < total_elements; i++) {
     pvalue_vec[i] = 0.0;
@@ -393,7 +395,6 @@ void ridgeRegTperm_core(
     zscore_vec[i] = 0.0;
   }
 
-  // Get number of threads for reduction
   int actual_threads = 1;
   #ifdef _OPENMP
     #pragma omp parallel
@@ -403,7 +404,7 @@ void ridgeRegTperm_core(
     }
   #endif
 
-  // Allocate per-thread accumulators for reduction
+  // Per-thread reduction buffers
   double *thread_sum = (double*)calloc((size_t)actual_threads * total_elements, sizeof(double));
   double *thread_sum_sq = (double*)calloc((size_t)actual_threads * total_elements, sizeof(double));
   double *thread_count = (double*)calloc((size_t)actual_threads * total_elements, sizeof(double));
@@ -416,33 +417,43 @@ void ridgeRegTperm_core(
       tid = omp_get_thread_num();
     #endif
 
-    // Thread-local pointers into the per-thread accumulator arrays
+    // Pointers to thread-local accumulators
     double *my_sum = &thread_sum[(size_t)tid * total_elements];
     double *my_sum_sq = &thread_sum_sq[(size_t)tid * total_elements];
     double *my_count = &thread_count[(size_t)tid * total_elements];
 
-    // Thread-local matrices
-    gsl_matrix *T_perm = gsl_matrix_alloc(p, n);
+    // Thread-local working matrices
+    gsl_matrix *Tt_perm = gsl_matrix_alloc(n, p);
     gsl_matrix *beta_rand = gsl_matrix_alloc(p, m);
+
+    // Helpers for memcpy
+    double *src_base = Tt_orig->data;
+    double *dst_base = Tt_perm->data;
+    size_t row_size_bytes = p * sizeof(double);
 
     #pragma omp for schedule(dynamic, 16)
     for(int i_rand = 0; i_rand < nrand; i_rand++) 
     {
       int *p_idx = &perm_table[(size_t)i_rand * n];
       
-      // Permute columns of T: T_perm[:, k] = T[:, p_idx[k]]
-      // This is equivalent to: T_perm @ Y = T @ Y[p_idx, :]
-      for(size_t col = 0; col < n; col++) {
-        size_t src_col = (size_t)p_idx[col];
-        for(size_t row = 0; row < p; row++) {
-          gsl_matrix_set(T_perm, row, col, gsl_matrix_get(T, row, src_col));
-        }
+      // OPTIMIZED PERMUTATION: Row-wise memcpy
+      // Tt_perm[row i] = Tt_orig[row p_idx[i]]
+      for(size_t i = 0; i < n; i++) {
+        int src_row_idx = p_idx[i];
+        memcpy(dst_base + (i * p), 
+               src_base + (src_row_idx * p), 
+               row_size_bytes);
       }
 
-      // beta_rand = T_perm @ Y = T_perm @ Yt^T
-      gsl_blas_dgemm(CblasNoTrans, CblasTrans, 1.0, T_perm, Yt, 0.0, beta_rand);
+      // Compute beta_rand
+      // Original: T[:, perm] @ Y
+      // Transposed formulation: (Tt_perm)^T @ (Yt)^T
+      // Tt_perm is n x p. op(A)=Trans -> p x n
+      // Yt is m x n.      op(B)=Trans -> n x m
+      // Result -> p x m
+      gsl_blas_dgemm(CblasTrans, CblasTrans, 1.0, Tt_perm, Yt, 0.0, beta_rand);
 
-      // Accumulate statistics into thread-local buffers
+      // Accumulate
       for(size_t r = 0; r < p; r++) {
         for(size_t c = 0; c < m; c++) {
           R_xlen_t idx = (R_xlen_t)r * m + c;
@@ -458,11 +469,11 @@ void ridgeRegTperm_core(
       }
     }
 
-    gsl_matrix_free(T_perm);
+    gsl_matrix_free(Tt_perm);
     gsl_matrix_free(beta_rand);
   }
 
-  // Reduce thread-local results
+  // Reduce results
   #pragma omp parallel for schedule(static)
   for(R_xlen_t i = 0; i < total_elements; i++) {
     double sum_val = 0.0, sum_sq_val = 0.0, count_val = 0.0;
@@ -482,7 +493,7 @@ void ridgeRegTperm_core(
   free(thread_count);
   free(perm_table);
 
-  // Finalize statistics (same formula as other versions)
+  // Finalize statistics
   double inv_nrand = 1.0 / nrand;
   #pragma omp parallel for schedule(static)
   for(R_xlen_t i = 0; i < total_elements; i++) {
@@ -494,6 +505,7 @@ void ridgeRegTperm_core(
     zscore_vec[i] = (se_rand > 1e-12) ? (beta_vec[i] - mean_rand) / se_rand : 0.0;
   }
 
+  gsl_matrix_free(Tt_orig);
   gsl_matrix_free(I_mat);
   gsl_matrix_free(T);
   gsl_matrix_partial_free(Xt);
