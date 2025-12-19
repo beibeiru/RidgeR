@@ -13,15 +13,13 @@
   #include <omp.h>
 #endif
 
-// --- TUNING ---
-// SAMPLE_STRIP_SIZE: How many samples (columns) we process at once.
-// Larger = Faster memcpy, but higher memory usage.
-// 256 is a sweet spot (2KB per gene row), fits in L1 cache.
-#define SAMPLE_STRIP_SIZE 256
-
-// PERM_BATCH_SIZE: How many permutations we stack for BLAS.
-// 32 * 256 = 8192 columns. Efficient for dgemm.
-#define PERM_BATCH_SIZE 32
+// --- ADAPTIVE TUNING CONSTANTS ---
+// We target ~512KB buffer size per thread to stay in L2 Cache.
+// 512 KB = 65,536 doubles.
+#define TARGET_BUFFER_ELEMENTS 65536
+#define MIN_STRIP_SIZE 16
+#define MAX_STRIP_SIZE 1024
+#define DEFAULT_PERM_BATCH 32
 
 /* =========================================================
    HELPER FUNCTIONS
@@ -39,7 +37,6 @@ void disable_blas_threading() {
     #endif
 }
 
-// Wrapper that treats R vector as (Rows x Cols)
 gsl_matrix *RVectorObject_to_gsl_matrix(double *vec, size_t nr, size_t nc) {
   gsl_block *b = (gsl_block*)malloc(sizeof(gsl_block));
   gsl_matrix *r = (gsl_matrix*)malloc(sizeof(gsl_matrix));
@@ -61,7 +58,7 @@ void shuffle(int array[], const int n) {
 }
 
 /* =========================================================
-   OLD VERSION (Legacy)
+   OLD VERSION (Legacy) - Kept Unchanged
    ========================================================= */
 void ridgeReg(
   double *X_vec, double *Y_vec,
@@ -69,12 +66,6 @@ void ridgeReg(
   double *lambda_pt, double *nrand_pt,
   double *beta_vec, double *se_vec, double *zscore_vec, double *pvalue_vec
 ) {
-  // R passes t(X): (p x n) -> we interpret as X (n x p) logic?
-  // Actually Old Code mapped: X_vec -> (n x p). Y_vec -> (n x m).
-  // This implies input was [Gene1Sig1, Gene1Sig2...] (Row Major?). 
-  // No, R is Col Major. t(X) makes it Row Major-ish.
-  // We keep this exactly as it was to ensure reproducibility.
-  
   gsl_matrix *X = RVectorObject_to_gsl_matrix(X_vec, *n_pt, *p_pt);
   gsl_matrix *Y = RVectorObject_to_gsl_matrix(Y_vec, *n_pt, *m_pt);
   gsl_matrix *beta = RVectorObject_to_gsl_matrix(beta_vec, *p_pt, *m_pt);
@@ -136,7 +127,7 @@ void ridgeReg(
 }
 
 /* =========================================================
-   NEW OPTIMIZED LOGIC (Memcpy + Tiling)
+   NEW OPTIMIZED LOGIC (Adaptive + Memcpy)
    ========================================================= */
 
 void ridgeRegFast_core(
@@ -154,9 +145,27 @@ void ridgeRegFast_core(
        #endif
   }
 
-  // View Inputs
-  // X_ptr is (n x p). Y_ptr is (n x m). (Because of t() in R)
-  // We view them exactly as the Old code did to preserve logic.
+  // --- ADAPTIVE BLOCK SIZING ---
+  // We want: n * strip_size * batch_size <= TARGET_BUFFER_ELEMENTS
+  // batch_size is fixed to DEFAULT_PERM_BATCH (32) for BLAS efficiency.
+  // So: strip_size <= TARGET / (n * 32)
+  
+  size_t perm_batch_size = DEFAULT_PERM_BATCH;
+  size_t sample_strip_size;
+  
+  // Calculate max strip size that fits in cache
+  size_t elements_per_col = n * perm_batch_size;
+  if (elements_per_col > 0) {
+      sample_strip_size = TARGET_BUFFER_ELEMENTS / elements_per_col;
+  } else {
+      sample_strip_size = MAX_STRIP_SIZE;
+  }
+
+  // Clamp to safe limits
+  if (sample_strip_size < MIN_STRIP_SIZE) sample_strip_size = MIN_STRIP_SIZE;
+  if (sample_strip_size > MAX_STRIP_SIZE) sample_strip_size = MAX_STRIP_SIZE;
+
+  // --- STANDARD SETUP ---
   gsl_matrix *X_gsl = RVectorObject_to_gsl_matrix(X_ptr, n, p);
   gsl_matrix *Y_gsl = RVectorObject_to_gsl_matrix(Y_ptr, n, m);
   gsl_matrix *beta  = RVectorObject_to_gsl_matrix(beta_vec, p, m);
@@ -164,18 +173,14 @@ void ridgeRegFast_core(
   gsl_matrix *I_mat = gsl_matrix_alloc(p, p);
   gsl_matrix *T = gsl_matrix_alloc(p, n);
 
-  // 1. T = (X'X + lambda*I)^-1 * X'
   gsl_matrix_set_identity(I_mat);
   gsl_blas_dsyrk(CblasLower, CblasTrans, 1.0, X_gsl, lambda, I_mat);
   gsl_linalg_cholesky_decomp(I_mat);
   gsl_linalg_cholesky_invert(I_mat);
-  // T = Inv * X^T
   gsl_blas_dgemm(CblasNoTrans, CblasTrans, 1.0, I_mat, X_gsl, 0.0, T);
 
-  // 2. Real Beta = T * Y
   gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, Y_gsl, 0.0, beta);
 
-  // 3. Pre-calculate Permutations
   int *perm_table = (int*)malloc((size_t)nrand * n * sizeof(int));
   int *temp_idx = (int*)malloc(n * sizeof(int));
   for(size_t k=0; k<n; k++) temp_idx[k] = (int)k;
@@ -193,66 +198,39 @@ void ridgeRegFast_core(
     pvalue_vec[i] = 0.0; se_vec[i] = 0.0; zscore_vec[i] = 0.0; 
   }
 
-  // 4. Batched Parallel Execution
+  // --- PARALLEL LOOP ---
   #pragma omp parallel
   {
-    // Y_block: Stacks permutations side-by-side. 
-    // Rows = Genes (n). Cols = (Batch * Strip).
-    // This layout allows us to memcpy rows from Y_gsl directly!
-    gsl_matrix *Y_block = gsl_matrix_alloc(n, SAMPLE_STRIP_SIZE * PERM_BATCH_SIZE);
+    // Allocate adaptive buffers
+    gsl_matrix *Y_block = gsl_matrix_alloc(n, sample_strip_size * perm_batch_size);
+    gsl_matrix *Beta_block = gsl_matrix_alloc(p, sample_strip_size * perm_batch_size);
     
-    // Beta_block: Result (p x (Batch*Strip))
-    gsl_matrix *Beta_block = gsl_matrix_alloc(p, SAMPLE_STRIP_SIZE * PERM_BATCH_SIZE);
-    
-    // Iterate over Samples (Column Strips)
     #pragma omp for schedule(dynamic)
-    for(size_t samp_start = 0; samp_start < m; samp_start += SAMPLE_STRIP_SIZE) 
+    for(size_t samp_start = 0; samp_start < m; samp_start += sample_strip_size) 
     {
-      size_t current_samples = (samp_start + SAMPLE_STRIP_SIZE > m) ? (m - samp_start) : SAMPLE_STRIP_SIZE;
+      size_t current_samples = (samp_start + sample_strip_size > m) ? (m - samp_start) : sample_strip_size;
       
-      // Iterate over Permutations
-      for(int b_start = 0; b_start < nrand; b_start += PERM_BATCH_SIZE)
+      for(int b_start = 0; b_start < nrand; b_start += perm_batch_size)
       {
-        int current_perms = (b_start + PERM_BATCH_SIZE > nrand) ? (nrand - b_start) : PERM_BATCH_SIZE;
-        size_t total_cols = current_perms * current_samples; // Cols in Y_block used
+        int current_perms = (b_start + perm_batch_size > nrand) ? (nrand - b_start) : (int)perm_batch_size;
+        size_t total_cols = current_perms * current_samples;
 
-        // A. Construct Block using MEMCPY
-        // We fill Y_block one gene-row at a time.
-        // For each Gene (row), we look up where it comes from (p_idx)
-        // and copy the chunk of samples associated with it.
-        
-        // Loop structure optimization:
-        // Outer loop: Permutations (to calculate offset in Y_block)
-        // Inner loop: Genes (Rows)
-        // Inside: Memcpy strip of samples
-        
+        // A. Memcpy Block Construction
         for(int i_perm = 0; i_perm < current_perms; i_perm++) {
            int *p_idx = &perm_table[(size_t)(b_start + i_perm) * n];
-           
-           // Destination column offset for this permutation
            size_t dest_col_offset = i_perm * current_samples;
            
            for(size_t row = 0; row < n; row++) {
-             // Which gene row from original Y do we want?
              size_t src_row_idx = p_idx[row];
-             
-             // Source Pointer: Y_gsl row 'src_row_idx', column 'samp_start'
-             // Y_gsl is (n x m). Row-major view of R's t(Y).
-             // Row `src_row_idx` contains contiguous samples for that gene.
              double *src_ptr = gsl_matrix_ptr(Y_gsl, src_row_idx, samp_start);
-             
-             // Dest Pointer: Y_block row 'row', column 'dest_col_offset'
              double *dest_ptr = gsl_matrix_ptr(Y_block, row, dest_col_offset);
-             
-             // FAST COPY: Copy 'current_samples' doubles at once
              memcpy(dest_ptr, src_ptr, current_samples * sizeof(double));
            }
         }
 
-        // B. Matrix Multiply: Beta_block = T * Y_block
+        // B. Matrix Multiply
         gsl_matrix_view Y_sub = gsl_matrix_submatrix(Y_block, 0, 0, n, total_cols);
         gsl_matrix_view B_sub = gsl_matrix_submatrix(Beta_block, 0, 0, p, total_cols);
-        
         gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, &Y_sub.matrix, 0.0, &B_sub.matrix);
 
         // C. Update Stats
@@ -260,15 +238,10 @@ void ridgeRegFast_core(
           size_t col_offset = i_perm * current_samples;
           
           for(size_t r = 0; r < p; r++) {
-            
-            // Pointer to the row 'r' inside the computed Beta_block
-            // We want the segment starting at col_offset
             double *beta_computed = gsl_matrix_ptr(&B_sub.matrix, r, col_offset);
             
             for(size_t s_local = 0; s_local < current_samples; s_local++) {
-              
               R_xlen_t global_idx = (R_xlen_t)r * m + (samp_start + s_local);
-              
               double b_rnd = beta_computed[s_local];
               double b_obs = beta_vec[global_idx]; 
 
@@ -284,7 +257,6 @@ void ridgeRegFast_core(
   }
 
   free(perm_table);
-  // Finalize
   double inv_nrand = 1.0 / nrand;
   #pragma omp parallel for schedule(static)
   for(R_xlen_t i=0; i<total_elements; i++) {
