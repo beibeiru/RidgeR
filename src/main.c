@@ -400,6 +400,49 @@ void ridgeRegFast_core(
 }
 
 /* =========================================================
+   .Call Interface (Supports Long Vectors > 2B)
+   ========================================================= */
+SEXP ridgeRegFast_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp, SEXP nrand_sexp, SEXP ncores_sexp) 
+{
+  SEXP x_dim = getAttrib(X_sexp, R_DimSymbol);
+  size_t n = (size_t)INTEGER(x_dim)[0];
+  size_t p = (size_t)INTEGER(x_dim)[1];
+
+  SEXP y_dim = getAttrib(Y_sexp, R_DimSymbol);
+  size_t m = (size_t)INTEGER(y_dim)[1];
+  
+  R_xlen_t total_len = (R_xlen_t)p * (R_xlen_t)m;
+
+  SEXP beta_sexp   = PROTECT(allocVector(REALSXP, total_len));
+  SEXP se_sexp     = PROTECT(allocVector(REALSXP, total_len));
+  SEXP zscore_sexp = PROTECT(allocVector(REALSXP, total_len));
+  SEXP pvalue_sexp = PROTECT(allocVector(REALSXP, total_len));
+
+  ridgeRegFast_core(
+    REAL(X_sexp), REAL(Y_sexp), n, p, m,
+    asReal(lambda_sexp), asInteger(nrand_sexp),
+    REAL(beta_sexp), REAL(se_sexp), REAL(zscore_sexp), REAL(pvalue_sexp),
+    asInteger(ncores_sexp)
+  );
+
+  SEXP res_list = PROTECT(allocVector(VECSXP, 4));
+  SET_VECTOR_ELT(res_list, 0, beta_sexp);
+  SET_VECTOR_ELT(res_list, 1, se_sexp);
+  SET_VECTOR_ELT(res_list, 2, zscore_sexp);
+  SET_VECTOR_ELT(res_list, 3, pvalue_sexp);
+  
+  SEXP names = PROTECT(allocVector(STRSXP, 4));
+  SET_STRING_ELT(names, 0, mkChar("beta"));
+  SET_STRING_ELT(names, 1, mkChar("se"));
+  SET_STRING_ELT(names, 2, mkChar("zscore"));
+  SET_STRING_ELT(names, 3, mkChar("pvalue"));
+  setAttrib(res_list, R_NamesSymbol, names);
+
+  UNPROTECT(6);
+  return res_list;
+}
+
+/* =========================================================
    VERSION 3: T COLUMN PERMUTATION (Multi-threaded)
    Used by: SecAct.inference.gsl.new2
    ========================================================= */
