@@ -7,23 +7,35 @@
 #include <string.h> // for memcpy
 #include <time.h>   // for seed
 #include <math.h>   // for sqrt, fabs
+#include <stdlib.h> // for setenv/putenv
 
 #ifdef _OPENMP
-  #include <omp.h>    // for OpenMP
+  #include <omp.h>
 #endif
 
 // --- TUNING ---
-// Number of samples (columns) a thread processes at one time.
-// 64 is small enough to fit in cache, large enough for BLAS efficiency.
-// This keeps memory usage CONSTANT per thread, regardless of m.
 #define SAMPLE_STRIP_SIZE 64 
-
-// Batch of permutations. 
 #define PERM_BATCH_SIZE 64
 
 /* =========================================================
    HELPER FUNCTIONS
    ========================================================= */
+
+// Platform-independent way to set environment variables
+// This stops BLAS from spawning nested threads
+void disable_blas_threading() {
+    #ifdef _WIN32
+        _putenv("OPENBLAS_NUM_THREADS=1");
+        _putenv("MKL_NUM_THREADS=1");
+        _putenv("VECLIB_MAXIMUM_THREADS=1");
+        _putenv("OMP_NUM_THREADS=1"); // Careful, this might affect outer OMP too if not set via API
+    #else
+        setenv("OPENBLAS_NUM_THREADS", "1", 1);
+        setenv("MKL_NUM_THREADS", "1", 1);
+        setenv("VECLIB_MAXIMUM_THREADS", "1", 1);
+        // We do NOT set OMP_NUM_THREADS here because we control that via omp_set_num_threads API
+    #endif
+}
 
 gsl_matrix *RVectorObject_to_gsl_matrix(double *vec, size_t nr, size_t nc)
 {
@@ -59,7 +71,7 @@ void shuffle(int array[], const int n)
 }
 
 /* =========================================================
-   OLD VERSION
+   OLD VERSION (Legacy .C Interface)
    ========================================================= */
 void ridgeReg(
   double *X_vec, double *Y_vec,
@@ -152,61 +164,46 @@ void ridgeReg(
 }
 
 /* =========================================================
-   NEW OPTIMIZED FUNCTION (Long Vector Support)
+   NEW OPTIMIZED LOGIC
    ========================================================= */
 
-// Internal logic for the new function
 void ridgeRegFast_core(
-  double *X_ptr, double *Y_ptr, // Raw R pointers
-  size_t n, size_t p, size_t m, // n=genes, p=proteins, m=samples
+  double *X_ptr, double *Y_ptr,
+  size_t n, size_t p, size_t m,
   double lambda, int nrand,
   double *beta_vec, double *se_vec, double *zscore_vec, double *pvalue_vec,
   int num_threads
 )
 {
+  // 1. Thread Setup & Conflict Prevention
   if (num_threads > 0) {
        #ifdef _OPENMP
            omp_set_num_threads(num_threads);
+           // Prevent nested parallelism from BLAS (Thread Explosion)
+           disable_blas_threading();
        #endif
   }
 
-  // --- THE TRICK ---
-  // R stores X as (n x p) Column-Major.
-  // GSL reads Row-Major. 
-  // If we map X_ptr as (p x n), GSL sees exactly t(X).
-  // This is perfect because the math usually requires X' anyway.
-  
-  // We want X_gsl to be (p x n) and Y_gsl to be (m x n) for efficient row slicing
-  gsl_matrix *Xt = RVectorObject_to_gsl_matrix(X_ptr, p, n); // Effectively t(X)
-  gsl_matrix *Yt = RVectorObject_to_gsl_matrix(Y_ptr, m, n); // Effectively t(Y)
+  // 2. Wrap R Memory (Zero Copy)
+  // X_ptr is passed as t(X) from R (length n*p). We view it as p x n.
+  gsl_matrix *Xt = RVectorObject_to_gsl_matrix(X_ptr, p, n);
+  gsl_matrix *Yt = RVectorObject_to_gsl_matrix(Y_ptr, m, n);
   gsl_matrix *beta = RVectorObject_to_gsl_matrix(beta_vec, p, m);
 
-  // Allocations
   gsl_matrix *I_mat = gsl_matrix_alloc(p, p);
   gsl_matrix *T = gsl_matrix_alloc(p, n);
 
-  // 1. Projection: T = (X'X + lambda*I)^-1 * X'
-  // Note: Since Xt is already transposed view, we use CblasNoTrans where we used Trans before
-  // Math: X_real = X (n x p). Xt = X' (p x n).
-  // We need (Xt * X)^-1. 
-  // In GSL with our view: Xt * Xt' 
-  
+  // 3. Model Training
   gsl_matrix_set_identity(I_mat);
-  // Xt (p x n) * Xt^T (n x p) -> (p x p)
   gsl_blas_dsyrk(CblasLower, CblasNoTrans, 1.0, Xt, lambda, I_mat);
   gsl_linalg_cholesky_decomp(I_mat);
   gsl_linalg_cholesky_invert(I_mat);
-  
-  // T = Inv * Xt
   gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, I_mat, Xt, 0.0, T);
 
-  // 2. Real Beta = T * Y_real
-  // Y_real is (n x m). Yt view is (m x n).
-  // Beta = T (p x n) * Y_real (n x m).
-  // Using Yt view: T * Yt^T
+  // 4. Calculate Real Beta
   gsl_blas_dgemm(CblasNoTrans, CblasTrans, 1.0, T, Yt, 0.0, beta);
 
-  // 3. Permutations
+  // 5. Pre-calculate Permutations (Deterministic)
   int *perm_table = (int*)malloc((size_t)nrand * n * sizeof(int));
   int *temp_idx = (int*)malloc(n * sizeof(int));
   for(size_t k=0; k<n; k++) temp_idx[k] = (int)k;
@@ -218,65 +215,57 @@ void ridgeRegFast_core(
   }
   free(temp_idx);
 
-  // Init outputs
+  // Initialize outputs (Parallel init for speed on large M)
   R_xlen_t total_elements = (R_xlen_t)p * (R_xlen_t)m;
   #pragma omp parallel for schedule(static)
   for(R_xlen_t i=0; i<total_elements; i++) {
     pvalue_vec[i] = 0.0; se_vec[i] = 0.0; zscore_vec[i] = 0.0; 
   }
 
-  // 4. Parallel Loop
+  // 6. Batched Parallel Execution (Double Tiling)
   #pragma omp parallel
   {
-    // Buffers
+    // Thread-local small buffers (Cache Friendly)
     gsl_matrix *Y_block = gsl_matrix_alloc(n, SAMPLE_STRIP_SIZE * PERM_BATCH_SIZE);
     gsl_matrix *Beta_block = gsl_matrix_alloc(p, SAMPLE_STRIP_SIZE * PERM_BATCH_SIZE);
     
-    // Loop over SAMPLES (which are Rows in our Yt view!)
-    // This allows efficient row slicing which GSL loves.
+    // Loop over Samples (Rows of Yt)
     #pragma omp for schedule(dynamic)
     for(size_t samp_start = 0; samp_start < m; samp_start += SAMPLE_STRIP_SIZE) 
     {
       size_t current_samples = (samp_start + SAMPLE_STRIP_SIZE > m) ? (m - samp_start) : SAMPLE_STRIP_SIZE;
       
+      // Loop over Permutation Batches
       for(int b_start = 0; b_start < nrand; b_start += PERM_BATCH_SIZE)
       {
         int current_perms = (b_start + PERM_BATCH_SIZE > nrand) ? (nrand - b_start) : PERM_BATCH_SIZE;
 
-        // Construct Y_block
-        // Yt is (m samples x n genes). We take specific rows (samples) and permute columns (genes).
+        // A. Construct Block
         for(int i_perm = 0; i_perm < current_perms; i_perm++) {
            int *p_idx = &perm_table[(size_t)(b_start + i_perm) * n];
            
            for(size_t s_local = 0; s_local < current_samples; s_local++) {
-             // We need to construct columns in Y_block from rows in Yt
-             // This is a transposing copy, but block size is small (cache friendly).
-             
-             // Yt row index
+             // Fetch specific row from Yt (sample)
              size_t global_samp_idx = samp_start + s_local;
              double *src_row = gsl_matrix_ptr(Yt, global_samp_idx, 0);
              
-             // Destination column in Y_block
+             // Place into column of Y_block
              size_t dest_col = (i_perm * current_samples) + s_local;
              
              for(size_t gene = 0; gene < n; gene++) {
-               // Apply permutation here. 
-               // Standard logic: permute rows of Y. 
-               // Here Yt is (Samples x Genes). We want to permute Genes.
-               // So we pick src_row[ p_idx[gene] ]
-               double val = src_row[ p_idx[gene] ];
-               gsl_matrix_set(Y_block, gene, dest_col, val);
+               // Apply permutation indices to columns (genes)
+               gsl_matrix_set(Y_block, gene, dest_col, src_row[ p_idx[gene] ]);
              }
            }
         }
 
-        // Multiply: Beta = T * Y_block
+        // B. Matrix Multiply: Beta_block = T * Y_block
         gsl_matrix_view Y_sub = gsl_matrix_submatrix(Y_block, 0, 0, n, current_perms * current_samples);
         gsl_matrix_view B_sub = gsl_matrix_submatrix(Beta_block, 0, 0, p, current_perms * current_samples);
         
         gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, &Y_sub.matrix, 0.0, &B_sub.matrix);
 
-        // Stats
+        // C. Update Global Stats
         for(int i_perm = 0; i_perm < current_perms; i_perm++) {
           for(size_t r = 0; r < p; r++) {
             for(size_t s_local = 0; s_local < current_samples; s_local++) {
@@ -298,7 +287,8 @@ void ridgeRegFast_core(
   }
 
   free(perm_table);
-  // Finalize (Same as before)
+
+  // 7. Finalize Stats
   double inv_nrand = 1.0 / nrand;
   #pragma omp parallel for schedule(static)
   for(R_xlen_t i=0; i<total_elements; i++) {
@@ -315,25 +305,28 @@ void ridgeRegFast_core(
 }
 
 
-// .Call Interface (Required for Long Vectors)
+/* =========================================================
+   .Call Interface (Supports Long Vectors > 2B)
+   ========================================================= */
 SEXP ridgeRegFast_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp, SEXP nrand_sexp, SEXP ncores_sexp) 
 {
-    // INPUTS ARE NOW UN-TRANSPOSED
+    // Extract Dimensions from R Attributes
     SEXP x_dim = getAttrib(X_sexp, R_DimSymbol);
     size_t n = (size_t)INTEGER(x_dim)[0]; // Genes
     size_t p = (size_t)INTEGER(x_dim)[1]; // Proteins
 
     SEXP y_dim = getAttrib(Y_sexp, R_DimSymbol);
-    // n from Y must match n from X
     size_t m = (size_t)INTEGER(y_dim)[1]; // Samples
     
     R_xlen_t total_len = (R_xlen_t)p * (R_xlen_t)m;
 
+    // Allocate Result Vectors (Safe for Long Vectors)
     SEXP beta_sexp   = PROTECT(allocVector(REALSXP, total_len));
     SEXP se_sexp     = PROTECT(allocVector(REALSXP, total_len));
     SEXP zscore_sexp = PROTECT(allocVector(REALSXP, total_len));
     SEXP pvalue_sexp = PROTECT(allocVector(REALSXP, total_len));
 
+    // Call Core Logic
     ridgeRegFast_core(
         REAL(X_sexp), REAL(Y_sexp), n, p, m,
         asReal(lambda_sexp), asInteger(nrand_sexp),
@@ -341,6 +334,7 @@ SEXP ridgeRegFast_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp, SEXP nra
         asInteger(ncores_sexp)
     );
 
+    // Format Return List
     SEXP res_list = PROTECT(allocVector(VECSXP, 4));
     SET_VECTOR_ELT(res_list, 0, beta_sexp);
     SET_VECTOR_ELT(res_list, 1, se_sexp);
@@ -358,7 +352,7 @@ SEXP ridgeRegFast_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp, SEXP nra
     return res_list;
 }
 
-// Registration
+// Function Registration
 static const R_CMethodDef cMethods[] = {
     {"ridgeReg", (DL_FUNC) &ridgeReg, 11},
     {NULL, NULL, 0}
@@ -369,8 +363,7 @@ static const R_CallMethodDef callMethods[] = {
     {NULL, NULL, 0}
 };
 
-void R_init_SecAct(DllInfo *dll) {
+void R_init_SecAct(DllInfo *dll) { 
     R_registerRoutines(dll, cMethods, callMethods, NULL, NULL);
     R_useDynamicSymbols(dll, FALSE);
 }
-
