@@ -152,7 +152,7 @@ void ridgeReg(
 }
 
 /* =========================================================
-   VERSION 1.5: SINGLE THREADED T-PERM (Cache Optimized)
+   VERSION 1.5: SINGLE THREADED T-PERM (Cache Optimized & Matched)
    Used by: SecAct.inference.gsl.old2
    ========================================================= */
 void ridgeRegTperm_single(
@@ -187,8 +187,6 @@ void ridgeRegTperm_single(
   gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, I_mat, Xt, 0.0, T);
 
   // Observed beta = T * Y
-  // Math: beta = T @ Y
-  // GSL:  beta = T @ Yt^T
   gsl_blas_dgemm(CblasNoTrans, CblasTrans, 1.0, T, Yt, 0.0, beta);
 
   // --- PREPARE FOR CACHE-EFFICIENT PERMUTATION ---
@@ -221,15 +219,19 @@ void ridgeRegTperm_single(
   {
     shuffle(p_idx, n);
 
-    // Optimized Permutation: Row-wise memcpy on T^T
-    for(int r=0; r<n; r++) {
-       memcpy(dst_base + (r * p), 
-              src_base + (p_idx[r] * p), 
+    // EXACT MATCH LOGIC: SCATTER Permutation on T^T
+    // Old method: Y_row[i] comes from Y_row[p[i]]. (Gather on Y)
+    // To match term-by-term: T_col[p[i]] must come from T_col[i].
+    // Since we use T^T (rows are cols of T):
+    // Tt_perm_row[p[i]] = Tt_orig_row[i].
+    for(int i=0; i<n; i++) {
+       int dst_row_idx = p_idx[i];
+       memcpy(dst_base + (dst_row_idx * p), 
+              src_base + (i * p), 
               row_size_bytes);
     }
 
-    // beta_rand = T_perm @ Y
-    //           = (Tt_perm)^T @ Yt^T
+    // beta_rand = (Tt_perm)^T @ Yt^T
     gsl_blas_dgemm(CblasTrans, CblasTrans, 1.0, Tt_perm, Yt, 0.0, beta_rand);
 
     // Accumulate
@@ -284,9 +286,6 @@ void ridgeRegFast_core(
     #endif
   }
 
-  // R stores X as (n x p) Column-Major.
-  // GSL reads Row-Major. 
-  // Mapping X_ptr as (p x n) gives us t(X) directly.
   gsl_matrix *Xt = RVectorObject_to_gsl_matrix(X_ptr, p, n);
   gsl_matrix *Yt = RVectorObject_to_gsl_matrix(Y_ptr, m, n);
   gsl_matrix *beta = RVectorObject_to_gsl_matrix(beta_vec, p, m);
@@ -338,7 +337,7 @@ void ridgeRegFast_core(
       {
         int current_perms = (b_start + PERM_BATCH_SIZE > nrand) ? (nrand - b_start) : PERM_BATCH_SIZE;
 
-        // Construct Y_block with permuted rows
+        // Construct Y_block with permuted rows (GATHER logic)
         for(int i_perm = 0; i_perm < current_perms; i_perm++) {
           int *p_idx = &perm_table[(size_t)(b_start + i_perm) * n];
           
@@ -460,8 +459,8 @@ void ridgeRegTperm_core(
   }
 
   // Matrix views
-  gsl_matrix *Xt = RVectorObject_to_gsl_matrix(X_ptr, p, n);  // t(X): p x n
-  gsl_matrix *Yt = RVectorObject_to_gsl_matrix(Y_ptr, m, n);  // t(Y): m x n (GSL view of Col-Major R matrix)
+  gsl_matrix *Xt = RVectorObject_to_gsl_matrix(X_ptr, p, n);
+  gsl_matrix *Yt = RVectorObject_to_gsl_matrix(Y_ptr, m, n);
   gsl_matrix *beta = RVectorObject_to_gsl_matrix(beta_vec, p, m);
 
   gsl_matrix *I_mat = gsl_matrix_alloc(p, p);
@@ -474,11 +473,10 @@ void ridgeRegTperm_core(
   gsl_linalg_cholesky_invert(I_mat);
   gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, I_mat, Xt, 0.0, T);
 
-  // Observed beta = T @ Y (= T @ Yt^T in our view)
+  // Observed beta
   gsl_blas_dgemm(CblasNoTrans, CblasTrans, 1.0, T, Yt, 0.0, beta);
 
   // --- PREPARE FOR CACHE-EFFICIENT PERMUTATION ---
-  // Create T^T (n x p). GSL stores Row-Major.
   gsl_matrix *Tt_orig = gsl_matrix_alloc(n, p);
   gsl_matrix_transpose_memcpy(Tt_orig, T);
 
@@ -526,16 +524,13 @@ void ridgeRegTperm_core(
       tid = omp_get_thread_num();
     #endif
 
-    // Pointers to thread-local accumulators
     double *my_sum = &thread_sum[(size_t)tid * total_elements];
     double *my_sum_sq = &thread_sum_sq[(size_t)tid * total_elements];
     double *my_count = &thread_count[(size_t)tid * total_elements];
 
-    // Thread-local working matrices
     gsl_matrix *Tt_perm = gsl_matrix_alloc(n, p);
     gsl_matrix *beta_rand = gsl_matrix_alloc(p, m);
 
-    // Helpers for memcpy
     double *src_base = Tt_orig->data;
     double *dst_base = Tt_perm->data;
     size_t row_size_bytes = p * sizeof(double);
@@ -545,19 +540,17 @@ void ridgeRegTperm_core(
     {
       int *p_idx = &perm_table[(size_t)i_rand * n];
       
-      // OPTIMIZED PERMUTATION: Row-wise memcpy
-      // Tt_perm[row i] = Tt_orig[row p_idx[i]]
+      // OPTIMIZED PERMUTATION: Row-wise SCATTER
+      // Use SCATTER (dst[p[i]] = src[i]) to match term-wise with GATHER on Y (Y[p[i]]).
       for(size_t i = 0; i < n; i++) {
-        int src_row_idx = p_idx[i];
-        memcpy(dst_base + (i * p), 
-               src_base + (src_row_idx * p), 
+        int dst_row_idx = p_idx[i];
+        memcpy(dst_base + (dst_row_idx * p), 
+               src_base + (i * p), 
                row_size_bytes);
       }
 
-      // beta_rand = (Tt_perm)^T @ (Yt)^T
       gsl_blas_dgemm(CblasTrans, CblasTrans, 1.0, Tt_perm, Yt, 0.0, beta_rand);
 
-      // Accumulate
       for(size_t r = 0; r < p; r++) {
         for(size_t c = 0; c < m; c++) {
           R_xlen_t idx = (R_xlen_t)r * m + c;
@@ -597,7 +590,6 @@ void ridgeRegTperm_core(
   free(thread_count);
   free(perm_table);
 
-  // Finalize statistics
   double inv_nrand = 1.0 / nrand;
   #pragma omp parallel for schedule(static)
   for(R_xlen_t i = 0; i < total_elements; i++) {
