@@ -155,7 +155,8 @@ void ridgeReg(
    VERSION 1.5: SINGLE THREADED T-PERM (Cache Optimized & Matched)
    Used by: SecAct.inference.gsl.old2
    
-   FIX: Updated to handle Row-Major inputs (t(X), t(Y)) passed by .C
+   FIXED: Uses permutation table pre-generation to strictly match
+   the random sequence of new/new2, ensuring identical results.
    ========================================================= */
 void ridgeRegTperm(
   double *X_vec, double *Y_vec,
@@ -197,15 +198,23 @@ void ridgeRegTperm(
   gsl_matrix *Tt_perm = gsl_matrix_alloc(n, p);
   gsl_matrix *beta_rand = gsl_matrix_alloc(p, m);
 
-  int *p_idx = (int*)malloc(n * sizeof(int));
-  for(int k=0; k<n; k++) p_idx[k] = k;
+  // Pre-generate permutation table to match new/new2 exactly
+  int *perm_table = (int*)malloc((size_t)nrand * n * sizeof(int));
+  int *temp_idx = (int*)malloc(n * sizeof(int));
+  for(int k=0; k<n; k++) temp_idx[k] = k;
+
+  srand(0);
+  for(int i_rand = 0; i_rand < nrand; i_rand++) {
+    shuffle(temp_idx, n);
+    memcpy(&perm_table[(size_t)i_rand * n], temp_idx, n * sizeof(int));
+  }
+  free(temp_idx);
 
   // Helpers for memcpy
   double *src_base = Tt_orig->data;
   double *dst_base = Tt_perm->data;
   size_t row_size_bytes = p * sizeof(double);
-
-  // Initialize Statistics
+  
   size_t total_elements = (size_t)p * m;
   for(size_t i=0; i<total_elements; i++) {
     pvalue_vec[i] = 0.0;
@@ -213,11 +222,9 @@ void ridgeRegTperm(
     zscore_vec[i] = 0.0;
   }
 
-  srand(0);
-
   for(int i_rand=0; i_rand<nrand; i_rand++)
   {
-    shuffle(p_idx, n);
+    int *p_idx = &perm_table[(size_t)i_rand * n];
 
     // Scatter Permutation
     for(int i=0; i<n; i++) {
@@ -227,10 +234,7 @@ void ridgeRegTperm(
               row_size_bytes);
     }
 
-    // beta_rand = T_perm * Y
-    //           = (Tt_perm)^T * Y
-    // Y is (n x m). Tt_perm is (n x p).
-    // result = Tt_perm^T (p x n) * Y (n x m)
+    // beta_rand = T_perm * Y = (Tt_perm)^T * Y
     gsl_blas_dgemm(CblasTrans, CblasNoTrans, 1.0, Tt_perm, Y, 0.0, beta_rand);
 
     // Accumulate
@@ -255,7 +259,7 @@ void ridgeRegTperm(
     zscore_vec[i] = (se_rand > 1e-12) ? (beta_vec[i] - mean_rand) / se_rand : 0.0;
   }
 
-  free(p_idx);
+  free(perm_table);
   gsl_matrix_free(Tt_orig);
   gsl_matrix_free(Tt_perm);
   gsl_matrix_free(beta_rand);
