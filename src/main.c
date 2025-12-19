@@ -154,6 +154,8 @@ void ridgeReg(
 /* =========================================================
    VERSION 1.5: SINGLE THREADED T-PERM (Cache Optimized & Matched)
    Used by: SecAct.inference.gsl.old2
+   
+   FIX: Updated to handle Row-Major inputs (t(X), t(Y)) passed by .C
    ========================================================= */
 void ridgeRegTperm(
   double *X_vec, double *Y_vec,
@@ -168,12 +170,10 @@ void ridgeRegTperm(
   int nrand = (int)*nrand_pt;
   double lambda = *lambda_pt;
 
-  // Matrix views (using the "Transposed view" trick for correct math)
-  // Xt: (p x n) view of column-major X
-  gsl_matrix *Xt = RVectorObject_to_gsl_matrix(X_vec, p, n);
-  // Yt: (m x n) view of column-major Y
-  gsl_matrix *Yt = RVectorObject_to_gsl_matrix(Y_vec, m, n);
-  // beta: (p x m)
+  // OLD2 Interface passes t(X) and t(Y).
+  // These are Row-Major views of X(n,p) and Y(n,m).
+  gsl_matrix *X = RVectorObject_to_gsl_matrix(X_vec, n, p);
+  gsl_matrix *Y = RVectorObject_to_gsl_matrix(Y_vec, n, m);
   gsl_matrix *beta = RVectorObject_to_gsl_matrix(beta_vec, p, m);
 
   gsl_matrix *I_mat = gsl_matrix_alloc(p, p);
@@ -181,16 +181,16 @@ void ridgeRegTperm(
 
   // T = (X'X + lambda*I)^-1 * X'
   gsl_matrix_set_identity(I_mat);
-  gsl_blas_dsyrk(CblasLower, CblasNoTrans, 1.0, Xt, lambda, I_mat);
+  gsl_blas_dsyrk(CblasLower, CblasTrans, 1.0, X, lambda, I_mat);
   gsl_linalg_cholesky_decomp(I_mat);
   gsl_linalg_cholesky_invert(I_mat);
-  gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, I_mat, Xt, 0.0, T);
+  gsl_blas_dgemm(CblasNoTrans, CblasTrans, 1.0, I_mat, X, 0.0, T);
 
   // Observed beta = T * Y
-  gsl_blas_dgemm(CblasNoTrans, CblasTrans, 1.0, T, Yt, 0.0, beta);
+  gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, Y, 0.0, beta);
 
   // --- PREPARE FOR CACHE-EFFICIENT PERMUTATION ---
-  // Create T^T (n x p). GSL stores Row-Major.
+  // T is (p x n). We want T^T (n x p) stored Row-Major.
   gsl_matrix *Tt_orig = gsl_matrix_alloc(n, p);
   gsl_matrix_transpose_memcpy(Tt_orig, T);
 
@@ -219,11 +219,7 @@ void ridgeRegTperm(
   {
     shuffle(p_idx, n);
 
-    // EXACT MATCH LOGIC: SCATTER Permutation on T^T
-    // Old method: Y_row[i] comes from Y_row[p[i]]. (Gather on Y)
-    // To match term-by-term: T_col[p[i]] must come from T_col[i].
-    // Since we use T^T (rows are cols of T):
-    // Tt_perm_row[p[i]] = Tt_orig_row[i].
+    // Scatter Permutation
     for(int i=0; i<n; i++) {
        int dst_row_idx = p_idx[i];
        memcpy(dst_base + (dst_row_idx * p), 
@@ -231,8 +227,11 @@ void ridgeRegTperm(
               row_size_bytes);
     }
 
-    // beta_rand = (Tt_perm)^T @ Yt^T
-    gsl_blas_dgemm(CblasTrans, CblasTrans, 1.0, Tt_perm, Yt, 0.0, beta_rand);
+    // beta_rand = T_perm * Y
+    //           = (Tt_perm)^T * Y
+    // Y is (n x m). Tt_perm is (n x p).
+    // result = Tt_perm^T (p x n) * Y (n x m)
+    gsl_blas_dgemm(CblasTrans, CblasNoTrans, 1.0, Tt_perm, Y, 0.0, beta_rand);
 
     // Accumulate
     for(size_t k=0; k<total_elements; k++) {
@@ -262,8 +261,8 @@ void ridgeRegTperm(
   gsl_matrix_free(beta_rand);
   gsl_matrix_free(I_mat);
   gsl_matrix_free(T);
-  gsl_matrix_partial_free(Xt);
-  gsl_matrix_partial_free(Yt);
+  gsl_matrix_partial_free(X);
+  gsl_matrix_partial_free(Y);
   gsl_matrix_partial_free(beta);
 }
 
@@ -399,9 +398,6 @@ void ridgeRegFast_core(
   gsl_matrix_partial_free(beta);
 }
 
-/* =========================================================
-   .Call Interface (Supports Long Vectors > 2B)
-   ========================================================= */
 SEXP ridgeRegFast_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp, SEXP nrand_sexp, SEXP ncores_sexp) 
 {
   SEXP x_dim = getAttrib(X_sexp, R_DimSymbol);
