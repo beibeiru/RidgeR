@@ -13,13 +13,11 @@
   #include <omp.h>
 #endif
 
-// --- ADAPTIVE TUNING CONSTANTS ---
-// We target ~512KB buffer size per thread to stay in L2 Cache.
-// 512 KB = 65,536 doubles.
-#define TARGET_BUFFER_ELEMENTS 65536
-#define MIN_STRIP_SIZE 16
-#define MAX_STRIP_SIZE 1024
-#define DEFAULT_PERM_BATCH 32
+// --- DYNAMIC TUNING CONSTANTS ---
+// We target a buffer size that fits comfortably in L2 Cache per thread.
+// 2 MB = ~262,144 doubles.
+// This prevents memory bandwidth saturation on Apple Silicon.
+#define TARGET_CACHE_ELEMENTS 262144 
 
 /* =========================================================
    HELPER FUNCTIONS
@@ -58,7 +56,7 @@ void shuffle(int array[], const int n) {
 }
 
 /* =========================================================
-   OLD VERSION (Legacy) - Kept Unchanged
+   OLD VERSION (Legacy)
    ========================================================= */
 void ridgeReg(
   double *X_vec, double *Y_vec,
@@ -127,7 +125,7 @@ void ridgeReg(
 }
 
 /* =========================================================
-   NEW OPTIMIZED LOGIC (Adaptive + Memcpy)
+   NEW OPTIMIZED LOGIC (Dynamic Cache Tuning)
    ========================================================= */
 
 void ridgeRegFast_core(
@@ -145,27 +143,27 @@ void ridgeRegFast_core(
        #endif
   }
 
-  // --- ADAPTIVE BLOCK SIZING ---
-  // We want: n * strip_size * batch_size <= TARGET_BUFFER_ELEMENTS
-  // batch_size is fixed to DEFAULT_PERM_BATCH (32) for BLAS efficiency.
-  // So: strip_size <= TARGET / (n * 32)
+  // --- DYNAMIC TUNING ---
+  // We calculate block sizes to stay within L2 cache limits.
+  // Formula: n * strip_size * batch_size <= TARGET_CACHE_ELEMENTS
   
-  size_t perm_batch_size = DEFAULT_PERM_BATCH;
-  size_t sample_strip_size;
+  // 1. Determine optimal Strip Size (Samples per block)
+  // We want at least 16 samples for vectorization, max 128 for responsiveness.
+  size_t sample_strip_size = 64; 
   
-  // Calculate max strip size that fits in cache
-  size_t elements_per_col = n * perm_batch_size;
-  if (elements_per_col > 0) {
-      sample_strip_size = TARGET_BUFFER_ELEMENTS / elements_per_col;
-  } else {
-      sample_strip_size = MAX_STRIP_SIZE;
+  // 2. Determine optimal Batch Size (Permutations per block) based on remaining memory
+  size_t elements_per_perm_strip = n * sample_strip_size;
+  size_t perm_batch_size = 1;
+  
+  if (elements_per_perm_strip < TARGET_CACHE_ELEMENTS) {
+      perm_batch_size = TARGET_CACHE_ELEMENTS / elements_per_perm_strip;
   }
+  
+  // Safety Clamps
+  if (perm_batch_size < 1) perm_batch_size = 1;
+  if (perm_batch_size > 32) perm_batch_size = 32; // Diminishing returns after 32
 
-  // Clamp to safe limits
-  if (sample_strip_size < MIN_STRIP_SIZE) sample_strip_size = MIN_STRIP_SIZE;
-  if (sample_strip_size > MAX_STRIP_SIZE) sample_strip_size = MAX_STRIP_SIZE;
-
-  // --- STANDARD SETUP ---
+  // --- SETUP ---
   gsl_matrix *X_gsl = RVectorObject_to_gsl_matrix(X_ptr, n, p);
   gsl_matrix *Y_gsl = RVectorObject_to_gsl_matrix(Y_ptr, n, m);
   gsl_matrix *beta  = RVectorObject_to_gsl_matrix(beta_vec, p, m);
@@ -201,7 +199,7 @@ void ridgeRegFast_core(
   // --- PARALLEL LOOP ---
   #pragma omp parallel
   {
-    // Allocate adaptive buffers
+    // Buffers allocated per thread
     gsl_matrix *Y_block = gsl_matrix_alloc(n, sample_strip_size * perm_batch_size);
     gsl_matrix *Beta_block = gsl_matrix_alloc(p, sample_strip_size * perm_batch_size);
     
@@ -210,12 +208,12 @@ void ridgeRegFast_core(
     {
       size_t current_samples = (samp_start + sample_strip_size > m) ? (m - samp_start) : sample_strip_size;
       
-      for(int b_start = 0; b_start < nrand; b_start += perm_batch_size)
+      for(int b_start = 0; b_start < nrand; b_start += (int)perm_batch_size)
       {
-        int current_perms = (b_start + perm_batch_size > nrand) ? (nrand - b_start) : (int)perm_batch_size;
+        int current_perms = (b_start + (int)perm_batch_size > nrand) ? (nrand - b_start) : (int)perm_batch_size;
         size_t total_cols = current_perms * current_samples;
 
-        // A. Memcpy Block Construction
+        // A. Construct Block (Fast Memcpy)
         for(int i_perm = 0; i_perm < current_perms; i_perm++) {
            int *p_idx = &perm_table[(size_t)(b_start + i_perm) * n];
            size_t dest_col_offset = i_perm * current_samples;
