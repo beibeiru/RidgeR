@@ -69,32 +69,25 @@ static void shuffle_array(int *array, const int n) {
 static int* generate_permutation_table(int n, int nrand) {
     size_t table_size = (size_t)nrand * (size_t)n;
     int *table = (int*)malloc(table_size * sizeof(int));
-    int *base_indices = (int*)malloc((size_t)n * sizeof(int));
-    
-    /* Use GSL's Mersenne Twister - identical across all platforms */
-    gsl_rng *rng = gsl_rng_alloc(gsl_rng_mt19937);
-    gsl_rng_set(rng, 0);  /* Fixed seed for reproducibility */
-    
+    int *array = (int*)malloc((size_t)n * sizeof(int));
+
+    /* Initialize index array */
     for (int i = 0; i < n; i++) {
-        base_indices[i] = i;
+        array[i] = i;
     }
-    
+
+    /* Same seed as original */
+    srand(0);
+
+    /* Cumulative shuffle - each iteration shuffles the previous result */
     for (int perm = 0; perm < nrand; perm++) {
-        /* Fisher-Yates shuffle using GSL's rng */
-        for (int i = n - 1; i > 0; i--) {
-            int j = gsl_rng_uniform_int(rng, i + 1);
-            int tmp = base_indices[j];
-            base_indices[j] = base_indices[i];
-            base_indices[i] = tmp;
-        }
-        memcpy(table + ((size_t)perm * n), base_indices, n * sizeof(int));
+        shuffle_array(array, n);  /* Modifies in-place */
+        memcpy(table + ((size_t)perm * n), array, n * sizeof(int));
     }
-    
-    gsl_rng_free(rng);
-    free(base_indices);
+
+    free(array);
     return table;
 }
-
 
 /* =============================================================================
  * SECTION 2: GSL MATRIX HELPERS
