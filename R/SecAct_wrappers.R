@@ -516,6 +516,7 @@ SecAct.activity.inference <- function(
             m <- ncol(Y)
             len <- p * m
             
+            # Legacy .C interface expects transposed matrices
             raw <- .C(
                 "ridgeReg",
                 as.double(t(X)),
@@ -544,9 +545,10 @@ SecAct.activity.inference <- function(
             )
         },
         "old" = {
+            # .Call interface expects NON-transposed matrices
             raw <- .Call(
                 "ridgeReg_old_interface",
-                t(X), t(Y),
+                X, Y,
                 as.numeric(lambda),
                 as.integer(nrand),
                 PACKAGE = "RidgeR"
@@ -563,9 +565,10 @@ SecAct.activity.inference <- function(
             )
         },
         "old2" = {
+            # .Call interface expects NON-transposed matrices
             raw <- .Call(
                 "ridgeRegTperm_old_interface",
-                t(X), t(Y),
+                X, Y,
                 as.numeric(lambda),
                 as.integer(nrand),
                 PACKAGE = "RidgeR"
@@ -582,9 +585,10 @@ SecAct.activity.inference <- function(
             )
         },
         "new" = {
+            # .Call interface expects NON-transposed matrices
             raw <- .Call(
                 "ridgeRegFast_interface",
-                t(X), t(Y),
+                X, Y,
                 as.numeric(lambda),
                 as.integer(nrand),
                 as.integer(ncores),
@@ -602,9 +606,10 @@ SecAct.activity.inference <- function(
             )
         },
         "new2" = {
+            # .Call interface expects NON-transposed matrices
             raw <- .Call(
                 "ridgeRegTperm_interface",
-                t(X), t(Y),
+                X, Y,
                 as.numeric(lambda),
                 as.integer(nrand),
                 as.integer(ncores),
