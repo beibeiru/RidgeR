@@ -15,10 +15,9 @@
 #define PERM_BATCH_SIZE 64
 
 /* =========================================================
-   CORE HELPERS
+   HELPER FUNCTIONS
    ========================================================= */
 
-// Fisher-Yates Shuffle
 void shuffle(int array[], const int n) {
     int i, j, t;
     for (i = 0; i < n - 1; i++) {
@@ -27,13 +26,12 @@ void shuffle(int array[], const int n) {
     }
 }
 
-// Master function to generate a shared permutation table
+// Generates a master permutation table to synchronize ALL 5 implementations
 int* generate_perm_table(int n, int nrand) {
     int *table = (int*)malloc((size_t)nrand * (size_t)n * sizeof(int));
     int *base_idx = (int*)malloc((size_t)n * sizeof(int));
     for(int i=0; i<n; i++) base_idx[i] = i;
-    
-    srand(0); // Synchronize all implementation starts
+    srand(0); 
     for(int i=0; i<nrand; i++) {
         shuffle(base_idx, n);
         memcpy(table + (i * n), base_idx, n * sizeof(int));
@@ -66,7 +64,7 @@ SEXP create_res_list(SEXP beta, SEXP se, SEXP zscore, SEXP pvalue) {
 }
 
 /* =========================================================
-   VERSION 0: LEGACY .C (Reference)
+   VERSION 0: LEGACY .C
    ========================================================= */
 void ridgeReg(double *X_vec, double *Y_vec, int *n_pt, int *p_pt, int *m_pt,
               double *lambda_pt, double *nrand_pt,
@@ -74,12 +72,9 @@ void ridgeReg(double *X_vec, double *Y_vec, int *n_pt, int *p_pt, int *m_pt,
     size_t n = (size_t)*n_pt, p = (size_t)*p_pt, m = (size_t)*m_pt;
     int nrand = (int)*nrand_pt; double lambda = *lambda_pt;
 
-    gsl_matrix *Xt = R_to_gsl_matrix(X_vec, p, n);
-    gsl_matrix *Yt = R_to_gsl_matrix(Y_vec, m, n);
-    gsl_matrix *beta = R_to_gsl_matrix(beta_vec, p, m);
-    gsl_matrix *aver_sq = R_to_gsl_matrix(se_vec, p, m);
-    gsl_matrix *zscore = R_to_gsl_matrix(zscore_vec, p, m);
-    gsl_matrix *pvalue = R_to_gsl_matrix(pvalue_vec, p, m);
+    gsl_matrix *Xt = R_to_gsl_matrix(X_vec, p, n), *Yt = R_to_gsl_matrix(Y_vec, m, n);
+    gsl_matrix *beta = R_to_gsl_matrix(beta_vec, p, m), *aver_sq = R_to_gsl_matrix(se_vec, p, m);
+    gsl_matrix *zscore = R_to_gsl_matrix(zscore_vec, p, m), *pvalue = R_to_gsl_matrix(pvalue_vec, p, m);
 
     gsl_matrix *I = gsl_matrix_alloc(p, p), *T = gsl_matrix_alloc(p, n);
     gsl_matrix *Yr = gsl_matrix_alloc(n, m), *Yp = gsl_matrix_alloc(n, m);
@@ -130,10 +125,9 @@ SEXP ridgeReg_old_interface(SEXP X_s, SEXP Y_s, SEXP lambda_s, SEXP nrand_s) {
     SEXP b_s = PROTECT(allocVector(REALSXP, len)), s_s = PROTECT(allocVector(REALSXP, len));
     SEXP z_s = PROTECT(allocVector(REALSXP, len)), p_s = PROTECT(allocVector(REALSXP, len));
     
-    gsl_matrix_view Xt = gsl_matrix_view_array(REAL(X_s), p, n);
-    gsl_matrix_view Yt = gsl_matrix_view_array(REAL(Y_s), m, n);
-    gsl_matrix *I = gsl_matrix_alloc(p, p), *T = gsl_matrix_alloc(p, n);
-    gsl_matrix *Yr = gsl_matrix_alloc(n, m), *Yp = gsl_matrix_alloc(n, m), *br = gsl_matrix_alloc(p, m);
+    gsl_matrix_view Xt = gsl_matrix_view_array(REAL(X_s), p, n), Yt = gsl_matrix_view_array(REAL(Y_s), m, n);
+    gsl_matrix *I = gsl_matrix_alloc(p, p), *T = gsl_matrix_alloc(p, n), *Yr = gsl_matrix_alloc(n, m);
+    gsl_matrix *Yp = gsl_matrix_alloc(n, m), *br = gsl_matrix_alloc(p, m);
 
     gsl_matrix_set_identity(I); gsl_blas_dsyrk(CblasLower, CblasNoTrans, 1.0, &Xt.matrix, lambda, I);
     gsl_linalg_cholesky_decomp(I); gsl_linalg_cholesky_invert(I);
@@ -176,8 +170,7 @@ SEXP ridgeRegTperm_old_interface(SEXP X_s, SEXP Y_s, SEXP lambda_s, SEXP nrand_s
     SEXP z_s = PROTECT(allocVector(REALSXP, len)), p_s = PROTECT(allocVector(REALSXP, len));
     double *bv = REAL(b_s), *sv = REAL(s_s), *zv = REAL(z_s), *pv = REAL(p_s);
 
-    gsl_matrix_view Xt = gsl_matrix_view_array(REAL(X_s), p, n);
-    gsl_matrix_view Yt = gsl_matrix_view_array(REAL(Y_s), m, n);
+    gsl_matrix_view Xt = gsl_matrix_view_array(REAL(X_s), p, n), Yt = gsl_matrix_view_array(REAL(Y_s), m, n);
     gsl_matrix *I = gsl_matrix_alloc(p, p), *T = gsl_matrix_alloc(p, n);
     gsl_matrix_set_identity(I); gsl_blas_dsyrk(CblasLower, CblasNoTrans, 1.0, &Xt.matrix, lambda, I);
     gsl_linalg_cholesky_decomp(I); gsl_linalg_cholesky_invert(I);
@@ -204,15 +197,14 @@ SEXP ridgeRegTperm_old_interface(SEXP X_s, SEXP Y_s, SEXP lambda_s, SEXP nrand_s
     for(R_xlen_t i=0; i<len; i++) {
         pv[i] = (pv[i] + 1.0) / (nrand + 1.0);
         double mr = zv[i] * inv_n; double vr = (sv[i] * inv_n) - (mr * mr);
-        sv[i] = sqrt(fmax(0.0, vr));
-        zv[i] = (sv[i] > 1e-12) ? (bv[i] - mr) / sv[i] : 0.0;
+        sv[i] = sqrt(fmax(0.0, vr)); zv[i] = (sv[i] > 1e-12) ? (bv[i] - mr) / sv[i] : 0.0;
     }
     free(p_tab); gsl_matrix_free(I); gsl_matrix_free(T); gsl_matrix_free(Tt_o); gsl_matrix_free(Tt_p); gsl_matrix_free(br);
     SEXP res = create_res_list(b_s, s_s, z_s, p_s); UNPROTECT(4); return res;
 }
 
 /* =========================================================
-   VERSION 2 & 3: .CALL MULTI-THREADED (Y-Perm & T-Perm)
+   VERSION 2 & 3: .CALL MULTI-THREADED (Thread-Safe Buffers)
    ========================================================= */
 
 SEXP ridgeRegFast_interface(SEXP X_s, SEXP Y_s, SEXP lambda_s, SEXP nrand_s, SEXP ncores_s) {
@@ -229,8 +221,7 @@ SEXP ridgeRegFast_interface(SEXP X_s, SEXP Y_s, SEXP lambda_s, SEXP nrand_s, SEX
     SEXP z_s = PROTECT(allocVector(REALSXP, len)), p_s = PROTECT(allocVector(REALSXP, len));
     double *bv = REAL(b_s), *sv = REAL(s_s), *zv = REAL(z_s), *pv = REAL(p_s);
 
-    gsl_matrix_view Xt = gsl_matrix_view_array(REAL(X_s), p, n);
-    gsl_matrix_view Yt = gsl_matrix_view_array(REAL(Y_s), m, n);
+    gsl_matrix_view Xt = gsl_matrix_view_array(REAL(X_s), p, n), Yt = gsl_matrix_view_array(REAL(Y_s), m, n);
     gsl_matrix *I = gsl_matrix_alloc(p, p), *T = gsl_matrix_alloc(p, n), *Yr = gsl_matrix_alloc(n, m);
     gsl_matrix_set_identity(I); gsl_blas_dsyrk(CblasLower, CblasNoTrans, 1.0, &Xt.matrix, lambda, I);
     gsl_linalg_cholesky_decomp(I); gsl_linalg_cholesky_invert(I);
@@ -242,53 +233,50 @@ SEXP ridgeRegFast_interface(SEXP X_s, SEXP Y_s, SEXP lambda_s, SEXP nrand_s, SEX
     int *p_tab = generate_perm_table((int)n, nrand);
     for(R_xlen_t i=0; i<len; i++) { pv[i]=0; sv[i]=0; zv[i]=0; }
 
+    int actual_threads = 1;
+    #ifdef _OPENMP
+      #pragma omp parallel
+      { #pragma omp single { actual_threads = omp_get_num_threads(); } }
+    #endif
+
+    double *th_s = (double*)calloc((size_t)actual_threads * (size_t)len, sizeof(double));
+    double *th_q = (double*)calloc((size_t)actual_threads * (size_t)len, sizeof(double));
+    double *th_c = (double*)calloc((size_t)actual_threads * (size_t)len, sizeof(double));
+
     #pragma omp parallel
     {
-        gsl_matrix *Yb = gsl_matrix_alloc(n, SAMPLE_STRIP_SIZE * PERM_BATCH_SIZE);
-        gsl_matrix *Bb = gsl_matrix_alloc(p, SAMPLE_STRIP_SIZE * PERM_BATCH_SIZE);
-        size_t row_sz = sizeof(double);
+        int tid = 0; 
+        #ifdef _OPENMP
+          tid = omp_get_thread_num(); 
+        #endif
+        double *ms = &th_s[(size_t)tid * len], *mq = &th_q[(size_t)tid * len], *mc = &th_c[(size_t)tid * len];
+        gsl_matrix *Yp = gsl_matrix_alloc(n, m), *br = gsl_matrix_alloc(p, m);
+        size_t rsz = m * sizeof(double);
+
         #pragma omp for schedule(dynamic)
-        for(size_t ss = 0; ss < m; ss += SAMPLE_STRIP_SIZE) {
-            size_t cs = (ss + SAMPLE_STRIP_SIZE > m) ? (m - ss) : SAMPLE_STRIP_SIZE;
-            for(int bs = 0; bs < nrand; bs += PERM_BATCH_SIZE) {
-                int cp = (bs + PERM_BATCH_SIZE > nrand) ? (nrand - bs) : PERM_BATCH_SIZE;
-                for(int ip = 0; ip < cp; ip++) {
-                    int *pidx = p_tab + ((size_t)(bs + ip) * n);
-                    for(size_t g = 0; g < n; g++) 
-                        memcpy(Yb->data + (g * (size_t)cp * (size_t)cs) + (ip * cs), Yr->data + ((size_t)pidx[g] * m) + ss, cs * row_sz);
-                }
-                gsl_matrix_view Ysub = gsl_matrix_submatrix(Yb, 0, 0, n, (size_t)cp * (size_t)cs);
-                gsl_matrix_view Bsub = gsl_matrix_submatrix(Bb, 0, 0, p, (size_t)cp * (size_t)cs);
-                gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, &Ysub.matrix, 0.0, &Bsub.matrix);
-                for(int ip = 0; ip < cp; ip++) {
-                    for(size_t r = 0; r < p; r++) {
-                        for(size_t sl = 0; sl < cs; sl++) {
-                            R_xlen_t idx = (R_xlen_t)r * m + (ss + sl);
-                            double brv = gsl_matrix_get(&Bsub.matrix, r, ((size_t)ip * cs) + sl);
-                            #pragma omp atomic
-                            zv[idx] += brv;
-                            #pragma omp atomic
-                            sv[idx] += (brv * brv);
-                            if(fabs(brv) >= fabs(bv[idx])) {
-                                #pragma omp atomic
-                                pv[idx]++;
-                            }
-                        }
-                    }
-                }
+        for(int i = 0; i < nrand; i++) {
+            int *pidx = p_tab + ((size_t)i * n);
+            for(size_t g = 0; g < n; g++) memcpy(Yp->data + (g * m), Yr->data + ((size_t)pidx[g] * m), rsz);
+            gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, Yp, 0.0, br);
+            for(R_xlen_t k=0; k<len; k++) {
+                if(fabs(br->data[k]) >= fabs(bv[k])) mc[k]++;
+                ms[k] += br->data[k]; mq[k] += br->data[k] * br->data[k];
             }
         }
-        gsl_matrix_free(Yb); gsl_matrix_free(Bb);
+        gsl_matrix_free(Yp); gsl_matrix_free(br);
+    }
+    for(int t=0; t<actual_threads; t++) {
+        for(R_xlen_t i=0; i<len; i++) {
+            zv[i] += th_s[(size_t)t * len + i]; sv[i] += th_q[(size_t)t * len + i]; pv[i] += th_c[(size_t)t * len + i];
+        }
     }
     double inv_n = 1.0 / nrand;
-    #pragma omp parallel for schedule(static)
     for(R_xlen_t i=0; i<len; i++) {
         pv[i] = (pv[i] + 1.0) / (nrand + 1.0);
         double mr = zv[i] * inv_n; double vr = (sv[i] * inv_n) - (mr * mr);
-        sv[i] = sqrt(fmax(0.0, vr));
-        zv[i] = (sv[i] > 1e-12) ? (bv[i] - mr) / sv[i] : 0.0;
+        sv[i] = sqrt(fmax(0.0, vr)); zv[i] = (sv[i] > 1e-12) ? (bv[i] - mr) / sv[i] : 0.0;
     }
-    free(p_tab); gsl_matrix_free(I); gsl_matrix_free(T); gsl_matrix_free(Yr);
+    free(th_s); free(th_q); free(th_c); free(p_tab); gsl_matrix_free(I); gsl_matrix_free(T); gsl_matrix_free(Yr);
     SEXP res = create_res_list(b_s, s_s, z_s, p_s); UNPROTECT(4); return res;
 }
 
@@ -306,8 +294,7 @@ SEXP ridgeRegTperm_interface(SEXP X_s, SEXP Y_s, SEXP lambda_s, SEXP nrand_s, SE
     SEXP z_s = PROTECT(allocVector(REALSXP, len)), p_s = PROTECT(allocVector(REALSXP, len));
     double *bv = REAL(b_s), *sv = REAL(s_s), *zv = REAL(z_s), *pv = REAL(p_s);
 
-    gsl_matrix_view Xt = gsl_matrix_view_array(REAL(X_s), p, n);
-    gsl_matrix_view Yt = gsl_matrix_view_array(REAL(Y_s), m, n);
+    gsl_matrix_view Xt = gsl_matrix_view_array(REAL(X_s), p, n), Yt = gsl_matrix_view_array(REAL(Y_s), m, n);
     gsl_matrix *I = gsl_matrix_alloc(p, p), *T = gsl_matrix_alloc(p, n);
     gsl_matrix_set_identity(I); gsl_blas_dsyrk(CblasLower, CblasNoTrans, 1.0, &Xt.matrix, lambda, I);
     gsl_linalg_cholesky_decomp(I); gsl_linalg_cholesky_invert(I);
@@ -319,41 +306,49 @@ SEXP ridgeRegTperm_interface(SEXP X_s, SEXP Y_s, SEXP lambda_s, SEXP nrand_s, SE
     int *p_tab = generate_perm_table((int)n, nrand);
     for(R_xlen_t i=0; i<len; i++) { pv[i]=0; sv[i]=0; zv[i]=0; }
 
+    int actual_threads = 1;
+    #ifdef _OPENMP
+      #pragma omp parallel
+      { #pragma omp single { actual_threads = omp_get_num_threads(); } }
+    #endif
+
+    double *th_s = (double*)calloc((size_t)actual_threads * (size_t)len, sizeof(double));
+    double *th_q = (double*)calloc((size_t)actual_threads * (size_t)len, sizeof(double));
+    double *th_c = (double*)calloc((size_t)actual_threads * (size_t)len, sizeof(double));
+
     #pragma omp parallel
     {
+        int tid = 0;
+        #ifdef _OPENMP
+          tid = omp_get_thread_num();
+        #endif
+        double *ms = &th_s[(size_t)tid * (size_t)len], *mq = &th_q[(size_t)tid * (size_t)len], *mc = &th_c[(size_t)tid * (size_t)len];
         gsl_matrix *Ttp = gsl_matrix_alloc(n, p), *br = gsl_matrix_alloc(p, m);
         size_t rsz = p * sizeof(double);
-        #pragma omp for schedule(dynamic, 16)
+        #pragma omp for schedule(dynamic)
         for(int i_r = 0; i_r < nrand; i_r++) {
-            int *pidx = p_tab + (i_r * n);
+            int *pidx = p_tab + ((size_t)i_r * n);
             for(size_t i = 0; i < n; i++) memcpy(Ttp->data + (i * p), Tt_o->data + ((size_t)pidx[i] * p), rsz);
             gsl_blas_dgemm(CblasTrans, CblasTrans, 1.0, Ttp, &Yt.matrix, 0.0, br);
-            for(size_t r = 0; r < p; r++) {
-                for(size_t c = 0; c < m; c++) {
-                    R_xlen_t idx = (R_xlen_t)r * m + c;
-                    double brv = gsl_matrix_get(br, r, c);
-                    #pragma omp atomic
-                    zv[idx] += brv;
-                    #pragma omp atomic
-                    sv[idx] += (brv * brv);
-                    if(fabs(brv) >= fabs(bv[idx])) {
-                        #pragma omp atomic
-                        pv[idx]++;
-                    }
-                }
+            for(R_xlen_t k=0; k<len; k++) {
+                if(fabs(br->data[k]) >= fabs(bv[k])) mc[k]++;
+                ms[k] += br->data[k]; mq[k] += br->data[k] * br->data[k];
             }
         }
         gsl_matrix_free(Ttp); gsl_matrix_free(br);
     }
+    for(int t=0; t<actual_threads; t++) {
+        for(R_xlen_t i=0; i<len; i++) {
+            zv[i] += th_s[(size_t)t * len + i]; sv[i] += th_q[(size_t)t * len + i]; pv[i] += th_c[(size_t)t * len + i];
+        }
+    }
     double inv_n = 1.0 / nrand;
-    #pragma omp parallel for schedule(static)
     for(R_xlen_t i = 0; i < len; i++) {
         pv[i] = (pv[i] + 1.0) / (nrand + 1.0);
         double mr = zv[i] * inv_n; double vr = (sv[i] * inv_n) - (mr * mr);
-        sv[i] = sqrt(fmax(0.0, vr));
-        zv[i] = (sv[i] > 1e-12) ? (bv[i] - mr) / sv[i] : 0.0;
+        sv[i] = sqrt(fmax(0.0, vr)); zv[i] = (sv[i] > 1e-12) ? (bv[i] - mr) / sv[i] : 0.0;
     }
-    free(p_tab); gsl_matrix_free(Tt_o); gsl_matrix_free(I); gsl_matrix_free(T);
+    free(th_s); free(th_q); free(th_c); free(p_tab); gsl_matrix_free(Tt_o); gsl_matrix_free(I); gsl_matrix_free(T);
     SEXP res = create_res_list(b_s, s_s, z_s, p_s); UNPROTECT(4); return res;
 }
 
