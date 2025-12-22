@@ -64,68 +64,71 @@ SEXP create_res_list(SEXP beta, SEXP se, SEXP zscore, SEXP pvalue) {
 }
 
 /* =========================================================
-   LEGACY .C VERSION
+   VERSION 0: LEGACY .C (Aligned to match New results)
    ========================================================= */
 void ridgeReg(
     double *X_vec, double *Y_vec, int *n_pt, int *p_pt, int *m_pt,
     double *lambda_pt, double *nrand_pt,
     double *beta_vec, double *se_vec, double *zscore_vec, double *pvalue_vec
 ) {
-    int n = *n_pt, p = *p_pt, m = *m_pt, nrand = (int)*nrand_pt;
+    size_t n = (size_t)*n_pt, p = (size_t)*p_pt, m = (size_t)*m_pt;
+    int nrand = (int)*nrand_pt;
     double lambda = *lambda_pt;
 
-    gsl_matrix *X = RVectorObject_to_gsl_matrix(X_vec, (size_t)n, (size_t)p);
-    gsl_matrix *Y = RVectorObject_to_gsl_matrix(Y_vec, (size_t)n, (size_t)m);
-    gsl_matrix *beta = RVectorObject_to_gsl_matrix(beta_vec, (size_t)p, (size_t)m);
-    gsl_matrix *aver_sq = RVectorObject_to_gsl_matrix(se_vec, (size_t)p, (size_t)m);
-    gsl_matrix *zscore = RVectorObject_to_gsl_matrix(zscore_vec, (size_t)p, (size_t)m);
-    gsl_matrix *pvalue = RVectorObject_to_gsl_matrix(pvalue_vec, (size_t)p, (size_t)m);
+    gsl_matrix *Xt = RVectorObject_to_gsl_matrix(X_vec, p, n);
+    gsl_matrix *Yt = RVectorObject_to_gsl_matrix(Y_vec, m, n);
+    gsl_matrix *beta = RVectorObject_to_gsl_matrix(beta_vec, p, m);
+    gsl_matrix *aver_sq = RVectorObject_to_gsl_matrix(se_vec, p, m);
+    gsl_matrix *zscore = RVectorObject_to_gsl_matrix(zscore_vec, p, m);
+    gsl_matrix *pvalue = RVectorObject_to_gsl_matrix(pvalue_vec, p, m);
 
     gsl_matrix *I = gsl_matrix_alloc(p, p);
     gsl_matrix *T = gsl_matrix_alloc(p, n);
     gsl_matrix *Y_rand = gsl_matrix_alloc(n, m);
     gsl_matrix *beta_rand = gsl_matrix_alloc(p, m);
     gsl_matrix *aver = gsl_matrix_alloc(p, m);
-    int *array_index = (int*)malloc(n * sizeof(int));
+    int *idx = (int*)malloc(n * sizeof(int));
 
     gsl_matrix_set_identity(I);
-    gsl_blas_dsyrk(CblasLower, CblasTrans, 1.0, X, lambda, I);
+    gsl_blas_dsyrk(CblasLower, CblasNoTrans, 1.0, Xt, lambda, I);
     gsl_linalg_cholesky_decomp(I);
     gsl_linalg_cholesky_invert(I);
-    gsl_blas_dgemm(CblasNoTrans, CblasTrans, 1.0, I, X, 0.0, T);
-    gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, Y, 0.0, beta);
+    gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, I, Xt, 0.0, T);
+    gsl_blas_dgemm(CblasNoTrans, CblasTrans, 1.0, T, Yt, 0.0, beta);
 
     srand(0);
-    for(int i=0; i<n; i++) array_index[i] = i;
+    for(size_t i=0; i<n; i++) idx[i] = (int)i;
     gsl_matrix_set_zero(aver); gsl_matrix_set_zero(aver_sq); gsl_matrix_set_zero(pvalue);
 
     for(int i=0; i<nrand; i++) {
-        shuffle(array_index, n);
-        for(int j=0; j<n; j++) {
-            gsl_vector_const_view t = gsl_matrix_const_row(Y, array_index[j]);
-            gsl_matrix_set_row(Y_rand, j, &t.vector);
+        shuffle(idx, (int)n);
+        for(size_t g=0; g<n; g++) {
+            for(size_t s=0; s<m; s++) {
+                gsl_matrix_set(Y_rand, g, s, gsl_matrix_get(Yt, s, idx[g]));
+            }
         }
         gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, Y_rand, 0.0, beta_rand);
-        for(int j=0; j < p*m; j++) if(fabs(beta_rand->data[j]) >= fabs(beta->data[j])) pvalue->data[j]++;
+        for(size_t j=0; j < p*m; j++) if(fabs(beta_rand->data[j]) >= fabs(beta->data[j])) pvalue->data[j]++;
         gsl_matrix_add(aver, beta_rand);
         gsl_matrix_mul_elements(beta_rand, beta_rand);
         gsl_matrix_add(aver_sq, beta_rand);
     }
 
-    gsl_matrix_scale(aver, 1.0/nrand);
-    gsl_matrix_scale(aver_sq, 1.0/nrand);
+    double inv_n = 1.0 / nrand;
+    gsl_matrix_scale(aver, inv_n);
+    gsl_matrix_scale(aver_sq, inv_n);
     gsl_matrix_add_constant(pvalue, 1.0);
     gsl_matrix_scale(pvalue, 1.0/(nrand + 1.0));
     gsl_matrix_memcpy(zscore, beta);
     gsl_matrix_sub(zscore, aver);
     gsl_matrix_mul_elements(aver, aver);
     gsl_matrix_sub(aver_sq, aver);
-    for(int i=0; i < p*m; i++) aver_sq->data[i] = sqrt(fmax(0.0, aver_sq->data[i]));
+    for(size_t i=0; i < p*m; i++) aver_sq->data[i] = sqrt(fmax(0.0, aver_sq->data[i]));
     gsl_matrix_div_elements(zscore, aver_sq);
 
-    free(array_index); gsl_matrix_free(I); gsl_matrix_free(T); gsl_matrix_free(Y_rand);
+    free(idx); gsl_matrix_free(I); gsl_matrix_free(T); gsl_matrix_free(Y_rand);
     gsl_matrix_free(beta_rand); gsl_matrix_free(aver);
-    gsl_matrix_partial_free(X); gsl_matrix_partial_free(Y); gsl_matrix_partial_free(beta);
+    gsl_matrix_partial_free(Xt); gsl_matrix_partial_free(Yt); gsl_matrix_partial_free(beta);
     gsl_matrix_partial_free(aver_sq); gsl_matrix_partial_free(zscore); gsl_matrix_partial_free(pvalue);
 }
 
@@ -134,9 +137,9 @@ void ridgeReg(
    ========================================================= */
 SEXP ridgeReg_old_interface(SEXP X_s, SEXP Y_s, SEXP lambda_s, SEXP nrand_s) {
     SEXP x_dim = getAttrib(X_s, R_DimSymbol);
-    int n = INTEGER(x_dim)[0], p = INTEGER(x_dim)[1];
+    size_t n = (size_t)INTEGER(x_dim)[0], p = (size_t)INTEGER(x_dim)[1];
     SEXP y_dim = getAttrib(Y_s, R_DimSymbol);
-    int m = INTEGER(y_dim)[1];
+    size_t m = (size_t)INTEGER(y_dim)[1];
     int nrand = asInteger(nrand_s);
     double lambda = asReal(lambda_s);
 
@@ -144,8 +147,8 @@ SEXP ridgeReg_old_interface(SEXP X_s, SEXP Y_s, SEXP lambda_s, SEXP nrand_s) {
     SEXP b_s = PROTECT(allocVector(REALSXP, total_len)), s_s = PROTECT(allocVector(REALSXP, total_len));
     SEXP z_s = PROTECT(allocVector(REALSXP, total_len)), p_s = PROTECT(allocVector(REALSXP, total_len));
 
-    gsl_matrix_view X = gsl_matrix_view_array(REAL(X_s), n, p);
-    gsl_matrix_view Y = gsl_matrix_view_array(REAL(Y_s), n, m);
+    gsl_matrix_view Xt = gsl_matrix_view_array(REAL(X_s), p, n);
+    gsl_matrix_view Yt = gsl_matrix_view_array(REAL(Y_s), m, n);
     gsl_matrix_view beta = gsl_matrix_view_array(REAL(b_s), p, m);
     gsl_matrix_view aver_sq = gsl_matrix_view_array(REAL(s_s), p, m);
     gsl_matrix_view zscore = gsl_matrix_view_array(REAL(z_s), p, m);
@@ -155,35 +158,37 @@ SEXP ridgeReg_old_interface(SEXP X_s, SEXP Y_s, SEXP lambda_s, SEXP nrand_s) {
     gsl_matrix *Y_rand = gsl_matrix_alloc(n, m), *beta_rand = gsl_matrix_alloc(p, m), *aver = gsl_matrix_alloc(p, m);
 
     gsl_matrix_set_identity(I);
-    gsl_blas_dsyrk(CblasLower, CblasTrans, 1.0, &X.matrix, lambda, I);
+    gsl_blas_dsyrk(CblasLower, CblasNoTrans, 1.0, &Xt.matrix, lambda, I);
     gsl_linalg_cholesky_decomp(I);
     gsl_linalg_cholesky_invert(I);
-    gsl_blas_dgemm(CblasNoTrans, CblasTrans, 1.0, I, &X.matrix, 0.0, T);
-    gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, &Y.matrix, 0.0, &beta.matrix);
+    gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, I, &Xt.matrix, 0.0, T);
+    gsl_blas_dgemm(CblasNoTrans, CblasTrans, 1.0, T, &Yt.matrix, 0.0, &beta.matrix);
 
     int *idx = (int*)malloc(n * sizeof(int));
-    for(int i=0; i<n; i++) idx[i] = i;
+    for(size_t i=0; i<n; i++) idx[i] = (int)i;
     srand(0);
     gsl_matrix_set_zero(aver); gsl_matrix_set_zero(&aver_sq.matrix); gsl_matrix_set_zero(&pvalue.matrix);
 
     for(int i=0; i<nrand; i++) {
-        shuffle(idx, n);
-        for(int j=0; j<n; j++) {
-            gsl_vector_const_view t = gsl_matrix_const_row(&Y.matrix, idx[j]);
-            gsl_matrix_set_row(Y_rand, j, &t.vector);
+        shuffle(idx, (int)n);
+        for(size_t g=0; g<n; g++) {
+            for(size_t s=0; s<m; s++) {
+                gsl_matrix_set(Y_rand, g, s, gsl_matrix_get(&Yt.matrix, s, idx[g]));
+            }
         }
         gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, Y_rand, 0.0, beta_rand);
-        for(int j=0; j < p*m; j++) if(fabs(beta_rand->data[j]) >= fabs(beta.matrix.data[j])) pvalue.matrix.data[j]++;
+        for(size_t j=0; j < p*m; j++) if(fabs(beta_rand->data[j]) >= fabs(beta.matrix.data[j])) pvalue.matrix.data[j]++;
         gsl_matrix_add(aver, beta_rand);
         gsl_matrix_mul_elements(beta_rand, beta_rand);
         gsl_matrix_add(&aver_sq.matrix, beta_rand);
     }
 
-    gsl_matrix_scale(aver, 1.0/nrand); gsl_matrix_scale(&aver_sq.matrix, 1.0/nrand);
+    double inv_n = 1.0 / nrand;
+    gsl_matrix_scale(aver, inv_n); gsl_matrix_scale(&aver_sq.matrix, inv_n);
     gsl_matrix_add_constant(&pvalue.matrix, 1.0); gsl_matrix_scale(&pvalue.matrix, 1.0/(nrand + 1.0));
     gsl_matrix_memcpy(&zscore.matrix, &beta.matrix); gsl_matrix_sub(&zscore.matrix, aver);
     gsl_matrix_mul_elements(aver, aver); gsl_matrix_sub(&aver_sq.matrix, aver);
-    for(int i=0; i < p*m; i++) aver_sq.matrix.data[i] = sqrt(fmax(0.0, aver_sq.matrix.data[i]));
+    for(size_t i=0; i < p*m; i++) aver_sq.matrix.data[i] = sqrt(fmax(0.0, aver_sq.matrix.data[i]));
     gsl_matrix_div_elements(&zscore.matrix, &aver_sq.matrix);
 
     free(idx); gsl_matrix_free(I); gsl_matrix_free(T); gsl_matrix_free(Y_rand);
@@ -197,9 +202,9 @@ SEXP ridgeReg_old_interface(SEXP X_s, SEXP Y_s, SEXP lambda_s, SEXP nrand_s) {
    ========================================================= */
 SEXP ridgeRegTperm_old_interface(SEXP X_s, SEXP Y_s, SEXP lambda_s, SEXP nrand_s) {
     SEXP x_dim = getAttrib(X_s, R_DimSymbol);
-    int n = INTEGER(x_dim)[0], p = INTEGER(x_dim)[1];
+    size_t n = (size_t)INTEGER(x_dim)[0], p = (size_t)INTEGER(x_dim)[1];
     SEXP y_dim = getAttrib(Y_s, R_DimSymbol);
-    int m = INTEGER(y_dim)[1];
+    size_t m = (size_t)INTEGER(y_dim)[1];
     int nrand = asInteger(nrand_s);
     double lambda = asReal(lambda_s);
 
@@ -208,27 +213,27 @@ SEXP ridgeRegTperm_old_interface(SEXP X_s, SEXP Y_s, SEXP lambda_s, SEXP nrand_s
     SEXP z_s = PROTECT(allocVector(REALSXP, len)), p_s = PROTECT(allocVector(REALSXP, len));
     double *bv = REAL(b_s), *sv = REAL(s_s), *zv = REAL(z_s), *pv = REAL(p_s);
 
-    gsl_matrix_view X = gsl_matrix_view_array(REAL(X_s), n, p);
-    gsl_matrix_view Y = gsl_matrix_view_array(REAL(Y_s), n, m);
+    gsl_matrix_view Xt = gsl_matrix_view_array(REAL(X_s), p, n);
+    gsl_matrix_view Yt = gsl_matrix_view_array(REAL(Y_s), m, n);
     gsl_matrix *I = gsl_matrix_alloc(p, p), *T = gsl_matrix_alloc(p, n);
     
     gsl_matrix_set_identity(I);
-    gsl_blas_dsyrk(CblasLower, CblasTrans, 1.0, &X.matrix, lambda, I);
+    gsl_blas_dsyrk(CblasLower, CblasNoTrans, 1.0, &Xt.matrix, lambda, I);
     gsl_linalg_cholesky_decomp(I);
     gsl_linalg_cholesky_invert(I);
-    gsl_blas_dgemm(CblasNoTrans, CblasTrans, 1.0, I, &X.matrix, 0.0, T);
+    gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, I, &Xt.matrix, 0.0, T);
     
     gsl_matrix_view beta_obs = gsl_matrix_view_array(bv, p, m);
-    gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, &Y.matrix, 0.0, &beta_obs.matrix);
+    gsl_blas_dgemm(CblasNoTrans, CblasTrans, 1.0, T, &Yt.matrix, 0.0, &beta_obs.matrix);
 
     gsl_matrix *Tt_o = gsl_matrix_alloc(n, p); gsl_matrix_transpose_memcpy(Tt_o, T);
     gsl_matrix *Tt_p = gsl_matrix_alloc(n, p); gsl_matrix *br = gsl_matrix_alloc(p, m);
 
     int *p_tab = (int*)malloc((size_t)nrand * n * sizeof(int));
     int *tmp = (int*)malloc(n * sizeof(int));
-    for(int k=0; k<n; k++) tmp[k] = k;
+    for(size_t k=0; k<n; k++) tmp[k] = (int)k;
     srand(0);
-    for(int i=0; i<nrand; i++) { shuffle(tmp, n); memcpy(&p_tab[(size_t)i * n], tmp, n * sizeof(int)); }
+    for(int i=0; i<nrand; i++) { shuffle(tmp, (int)n); memcpy(&p_tab[(size_t)i * n], tmp, n * sizeof(int)); }
     free(tmp);
 
     for(R_xlen_t i=0; i<len; i++) { pv[i]=0; sv[i]=0; zv[i]=0; }
@@ -236,8 +241,8 @@ SEXP ridgeRegTperm_old_interface(SEXP X_s, SEXP Y_s, SEXP lambda_s, SEXP nrand_s
 
     for(int i_r=0; i_r<nrand; i_r++) {
         int *p_idx = &p_tab[(size_t)i_r * n];
-        for(int i=0; i<n; i++) memcpy(Tt_p->data + (p_idx[i] * p), Tt_o->data + (i * p), row_sz);
-        gsl_blas_dgemm(CblasTrans, CblasNoTrans, 1.0, Tt_p, &Y.matrix, 0.0, br);
+        for(size_t i=0; i<n; i++) memcpy(Tt_p->data + (p_idx[i] * p), Tt_o->data + (i * p), row_sz);
+        gsl_blas_dgemm(CblasTrans, CblasTrans, 1.0, Tt_p, &Yt.matrix, 0.0, br);
         for(R_xlen_t k=0; k<len; k++) {
             if(fabs(br->data[k]) >= fabs(bv[k])) pv[k] += 1.0;
             zv[k] += br->data[k]; sv[k] += br->data[k] * br->data[k];
@@ -265,7 +270,7 @@ SEXP ridgeRegTperm_old_interface(SEXP X_s, SEXP Y_s, SEXP lambda_s, SEXP nrand_s
 SEXP ridgeRegFast_interface(SEXP X_s, SEXP Y_s, SEXP lambda_s, SEXP nrand_s, SEXP ncores_s) {
     int ncores = asInteger(ncores_s);
     #ifdef _OPENMP
-    if (ncores > 0) omp_set_num_threads(ncores);
+      if (ncores > 0) omp_set_num_threads(ncores);
     #endif
 
     SEXP x_dim = getAttrib(X_s, R_DimSymbol);
@@ -279,18 +284,18 @@ SEXP ridgeRegFast_interface(SEXP X_s, SEXP Y_s, SEXP lambda_s, SEXP nrand_s, SEX
     SEXP z_s = PROTECT(allocVector(REALSXP, len)), p_s = PROTECT(allocVector(REALSXP, len));
     double *bv = REAL(b_s), *sv = REAL(s_s), *zv = REAL(z_s), *pv = REAL(p_s);
 
-    gsl_matrix_view X = gsl_matrix_view_array(REAL(X_s), n, p);
-    gsl_matrix_view Y = gsl_matrix_view_array(REAL(Y_s), n, m);
+    gsl_matrix_view Xt = gsl_matrix_view_array(REAL(X_s), p, n);
+    gsl_matrix_view Yt = gsl_matrix_view_array(REAL(Y_s), m, n);
     gsl_matrix *I = gsl_matrix_alloc(p, p), *T = gsl_matrix_alloc(p, n);
 
     gsl_matrix_set_identity(I);
-    gsl_blas_dsyrk(CblasLower, CblasTrans, 1.0, &X.matrix, lambda, I);
+    gsl_blas_dsyrk(CblasLower, CblasNoTrans, 1.0, &Xt.matrix, lambda, I);
     gsl_linalg_cholesky_decomp(I);
     gsl_linalg_cholesky_invert(I);
-    gsl_blas_dgemm(CblasNoTrans, CblasTrans, 1.0, I, &X.matrix, 0.0, T);
+    gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, I, &Xt.matrix, 0.0, T);
     
     gsl_matrix_view bo = gsl_matrix_view_array(bv, p, m);
-    gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, &Y.matrix, 0.0, &bo.matrix);
+    gsl_blas_dgemm(CblasNoTrans, CblasTrans, 1.0, T, &Yt.matrix, 0.0, &bo.matrix);
 
     int *p_tab = (int*)malloc((size_t)nrand * n * sizeof(int));
     int *tmp = (int*)malloc(n * sizeof(int));
@@ -315,19 +320,19 @@ SEXP ridgeRegFast_interface(SEXP X_s, SEXP Y_s, SEXP lambda_s, SEXP nrand_s, SEX
                     int *pidx = &p_tab[(size_t)(bs + ip) * n];
                     for(size_t sl = 0; sl < cs; sl++) {
                         for(size_t gene = 0; gene < n; gene++) {
-                            double val = gsl_matrix_get(&Y.matrix, pidx[gene], ss + sl);
+                            double val = gsl_matrix_get(&Yt.matrix, ss + sl, (size_t)pidx[gene]);
                             gsl_matrix_set(Yb, gene, (ip * cs) + sl, val);
                         }
                     }
                 }
-                gsl_matrix_view Ysub = gsl_matrix_submatrix(Yb, 0, 0, n, cp * cs);
-                gsl_matrix_view Bsub = gsl_matrix_submatrix(Bb, 0, 0, p, cp * cs);
+                gsl_matrix_view Ysub = gsl_matrix_submatrix(Yb, 0, 0, n, (size_t)cp * (size_t)cs);
+                gsl_matrix_view Bsub = gsl_matrix_submatrix(Bb, 0, 0, p, (size_t)cp * (size_t)cs);
                 gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, &Ysub.matrix, 0.0, &Bsub.matrix);
                 for(int ip = 0; ip < cp; ip++) {
                     for(size_t r = 0; r < p; r++) {
                         for(size_t sl = 0; sl < cs; sl++) {
                             R_xlen_t idx = (R_xlen_t)r * m + (ss + sl);
-                            double brv = gsl_matrix_get(&Bsub.matrix, r, (ip * cs) + sl);
+                            double brv = gsl_matrix_get(&Bsub.matrix, r, ((size_t)ip * cs) + sl);
                             if(fabs(brv) >= fabs(bv[idx])) pv[idx] += 1.0;
                             zv[idx] += brv; sv[idx] += (brv * brv);
                         }
@@ -357,7 +362,7 @@ SEXP ridgeRegFast_interface(SEXP X_s, SEXP Y_s, SEXP lambda_s, SEXP nrand_s, SEX
 SEXP ridgeRegTperm_interface(SEXP X_s, SEXP Y_s, SEXP lambda_s, SEXP nrand_s, SEXP ncores_s) {
     int ncores = asInteger(ncores_s);
     #ifdef _OPENMP
-    if (ncores > 0) omp_set_num_threads(ncores);
+      if (ncores > 0) omp_set_num_threads(ncores);
     #endif
 
     SEXP x_dim = getAttrib(X_s, R_DimSymbol);
@@ -371,18 +376,18 @@ SEXP ridgeRegTperm_interface(SEXP X_s, SEXP Y_s, SEXP lambda_s, SEXP nrand_s, SE
     SEXP z_s = PROTECT(allocVector(REALSXP, len)), p_s = PROTECT(allocVector(REALSXP, len));
     double *bv = REAL(b_s), *sv = REAL(s_s), *zv = REAL(z_s), *pv = REAL(p_s);
 
-    gsl_matrix_view X = gsl_matrix_view_array(REAL(X_s), n, p);
-    gsl_matrix_view Y = gsl_matrix_view_array(REAL(Y_s), n, m);
+    gsl_matrix_view Xt = gsl_matrix_view_array(REAL(X_s), p, n);
+    gsl_matrix_view Yt = gsl_matrix_view_array(REAL(Y_s), m, n);
     gsl_matrix *I = gsl_matrix_alloc(p, p), *T = gsl_matrix_alloc(p, n);
 
     gsl_matrix_set_identity(I);
-    gsl_blas_dsyrk(CblasLower, CblasTrans, 1.0, &X.matrix, lambda, I);
+    gsl_blas_dsyrk(CblasLower, CblasNoTrans, 1.0, &Xt.matrix, lambda, I);
     gsl_linalg_cholesky_decomp(I);
     gsl_linalg_cholesky_invert(I);
-    gsl_blas_dgemm(CblasNoTrans, CblasTrans, 1.0, I, &X.matrix, 0.0, T);
+    gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, I, &Xt.matrix, 0.0, T);
     
     gsl_matrix_view bo = gsl_matrix_view_array(bv, p, m);
-    gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, &Y.matrix, 0.0, &bo.matrix);
+    gsl_blas_dgemm(CblasNoTrans, CblasTrans, 1.0, T, &Yt.matrix, 0.0, &bo.matrix);
 
     gsl_matrix *Tt_o = gsl_matrix_alloc(n, p); gsl_matrix_transpose_memcpy(Tt_o, T);
 
@@ -404,9 +409,9 @@ SEXP ridgeRegTperm_interface(SEXP X_s, SEXP Y_s, SEXP lambda_s, SEXP nrand_s, SE
     }
     #endif
 
-    double *th_s = (double*)calloc((size_t)actual_threads * len, sizeof(double));
-    double *th_q = (double*)calloc((size_t)actual_threads * len, sizeof(double));
-    double *th_c = (double*)calloc((size_t)actual_threads * len, sizeof(double));
+    double *th_s = (double*)calloc((size_t)actual_threads * (size_t)len, sizeof(double));
+    double *th_q = (double*)calloc((size_t)actual_threads * (size_t)len, sizeof(double));
+    double *th_c = (double*)calloc((size_t)actual_threads * (size_t)len, sizeof(double));
 
     #pragma omp parallel
     {
@@ -414,14 +419,14 @@ SEXP ridgeRegTperm_interface(SEXP X_s, SEXP Y_s, SEXP lambda_s, SEXP nrand_s, SE
         #ifdef _OPENMP
         tid = omp_get_thread_num();
         #endif
-        double *ms = &th_s[(size_t)tid * len], *mq = &th_q[(size_t)tid * len], *mc = &th_c[(size_t)tid * len];
+        double *ms = &th_s[(size_t)tid * (size_t)len], *mq = &th_q[(size_t)tid * (size_t)len], *mc = &th_c[(size_t)tid * (size_t)len];
         gsl_matrix *Ttp = gsl_matrix_alloc(n, p); gsl_matrix *br = gsl_matrix_alloc(p, m);
         size_t rsz = p * sizeof(double);
         #pragma omp for schedule(dynamic, 16)
         for(int i_r = 0; i_r < nrand; i_r++) {
             int *pidx = &p_tab[(size_t)i_r * n];
-            for(size_t i = 0; i < n; i++) memcpy(Ttp->data + (pidx[i] * p), Tt_o->data + (i * p), rsz);
-            gsl_blas_dgemm(CblasTrans, CblasNoTrans, 1.0, Ttp, &Y.matrix, 0.0, br);
+            for(size_t i = 0; i < n; i++) memcpy(Ttp->data + ((size_t)pidx[i] * p), Tt_o->data + (i * p), rsz);
+            gsl_blas_dgemm(CblasTrans, CblasTrans, 1.0, Ttp, &Yt.matrix, 0.0, br);
             for(size_t r = 0; r < p; r++) {
                 for(size_t c = 0; c < m; c++) {
                     R_xlen_t idx = (R_xlen_t)r * m + c;
@@ -438,7 +443,7 @@ SEXP ridgeRegTperm_interface(SEXP X_s, SEXP Y_s, SEXP lambda_s, SEXP nrand_s, SE
     for(R_xlen_t i = 0; i < len; i++) {
         double s = 0, sq = 0, c = 0;
         for(int t = 0; t < actual_threads; t++) {
-            size_t off = (size_t)t * len + i;
+            size_t off = (size_t)t * (size_t)len + (size_t)i;
             s += th_s[off]; sq += th_q[off]; c += th_c[off];
         }
         zv[i] = s; sv[i] = sq; pv[i] = c;
