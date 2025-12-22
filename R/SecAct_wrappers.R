@@ -424,6 +424,148 @@ SecAct.inference.gsl.new2 <- function(Y,
 
 
 # ==============================================================================
+# SECTION 5: PURE R IMPLEMENTATION
+# ==============================================================================
+
+#' Secreted Protein Activity Inference (Pure R Implementation)
+#'
+#' Pure R implementation of ridge regression with permutation testing.
+#' This version does not require GSL and is useful for debugging,
+#' validation, and environments where GSL is unavailable.
+#'
+#' @inheritParams SecAct.inference.gsl.legacy
+#' @param is.group.sig Logical indicating whether to group similar signatures
+#'   (default: FALSE for this low-level function).
+#' @param is.group.cor Correlation cutoff for signature grouping (default: 0.9).
+#'
+#' @return Named list with beta, se, zscore, pvalue matrices (proteins x samples)
+#'
+#' @details
+#' This implementation uses R's native linear algebra functions:
+#' \itemize{
+#'   \item \code{crossprod()} for X'X computation
+#'   \item \code{chol()} for Cholesky decomposition
+#'   \item \code{backsolve()} and \code{forwardsolve()} for solving linear systems
+#' }
+#'
+#' Each permutation uses \code{set.seed(i)} where i is the permutation index,
+#' ensuring reproducibility across runs.
+#'
+#' @examples
+#' \dontrun{
+#' # Create test data
+#' set.seed(123)
+#' Y <- matrix(rnorm(1000 * 10), nrow = 1000, ncol = 10)
+#' rownames(Y) <- paste0("Gene", 1:1000)
+#' colnames(Y) <- paste0("Sample", 1:10)
+#'
+#' # Run inference
+#' res <- SecAct.inference.r(Y, nrand = 100)
+#' head(res$zscore)
+#' }
+#'
+#' @export
+SecAct.inference.r <- function(Y,
+                                SigMat = "SecAct",
+                                lambda = 5e+05,
+                                nrand = 1000,
+                                is.group.sig = FALSE,
+                                is.group.cor = 0.9) {
+    # Load signature matrix
+    X <- .load_signature(SigMat)
+    
+    # Group similar signatures if requested
+    if (is.group.sig) {
+        X <- .group_signatures(X, is.group.cor)
+    }
+
+    # Find overlapping genes
+    olp <- intersect(rownames(Y), rownames(X))
+    if (length(olp) < 2) {
+        stop("Too few overlapping genes between expression and signature matrices!")
+    }
+
+    # Subset and scale
+    X <- as.matrix(X[olp, , drop = FALSE])
+    Y <- as.matrix(Y[olp, , drop = FALSE])
+    X <- scale(X)
+    Y <- scale(Y)
+
+    # Handle NAs from scaling
+    X[is.na(X)] <- 0
+    Y[is.na(Y)] <- 0
+
+    # Dimensions
+    n <- nrow(Y)
+    p <- ncol(X)
+    m <- ncol(Y)
+
+    # Compute ridge regression: beta = (X'X + lambda*I)^-1 * X' * Y
+    # Use Cholesky decomposition for numerical stability
+    A <- crossprod(X) + lambda * diag(p)  # X'X + lambda*I (SPD)
+    R <- chol(A)                           # A = R'R
+
+    # Solve for beta: R'R * beta = X'Y
+    beta <- backsolve(R, forwardsolve(t(R), crossprod(X, Y)))
+
+    # Permutation testing
+    aver <- NULL
+    aver_sq <- NULL
+    pvalue <- NULL
+
+    for (i in seq_len(nrand)) {
+        set.seed(i)
+        beta_rand <- backsolve(R, forwardsolve(t(R), crossprod(X, Y[sample.int(n), , drop = FALSE])))
+
+        if (i == 1) {
+            aver <- beta_rand
+            aver_sq <- beta_rand^2
+            pvalue <- (abs(beta_rand) >= abs(beta)) * 1.0
+        } else {
+            aver <- aver + beta_rand
+            aver_sq <- aver_sq + beta_rand^2
+            pvalue <- pvalue + (abs(beta_rand) >= abs(beta))
+        }
+    }
+
+    # Finalize statistics
+    aver <- aver / nrand
+    aver_sq <- aver_sq / nrand
+    se <- sqrt(aver_sq - aver * aver)
+    zscore <- (beta - aver) / se
+    zscore[!is.finite(zscore)] <- 0
+    pvalue <- (pvalue + 1) / (nrand + 1)
+
+    # Set dimension names
+    rownames(beta) <- colnames(X)
+    colnames(beta) <- colnames(Y)
+    rownames(se) <- colnames(X)
+    colnames(se) <- colnames(Y)
+    rownames(zscore) <- colnames(X)
+    colnames(zscore) <- colnames(Y)
+    rownames(pvalue) <- colnames(X)
+    colnames(pvalue) <- colnames(Y)
+
+    # Expand grouped signatures back to individual rows
+    if (is.group.sig) {
+        beta <- .expand_rows(beta)
+        se <- .expand_rows(se)
+        zscore <- .expand_rows(zscore)
+        pvalue <- .expand_rows(pvalue)
+
+        # Sort by row name
+        row_order <- sort(rownames(beta))
+        beta <- beta[row_order, , drop = FALSE]
+        se <- se[row_order, , drop = FALSE]
+        zscore <- zscore[row_order, , drop = FALSE]
+        pvalue <- pvalue[row_order, , drop = FALSE]
+    }
+
+    list(beta = beta, se = se, zscore = zscore, pvalue = pvalue)
+}
+
+
+# ==============================================================================
 # SECTION 5: TESTING & COMPARISON UTILITIES
 # ==============================================================================
 
@@ -892,4 +1034,427 @@ SecAct.compare.activity <- function(
         new    = res_new,
         new2   = res_new2
     ))
+}
+
+
+# ==============================================================================
+# SECTION 8: ST DATA HELPER FUNCTIONS
+# ==============================================================================
+
+#' Transfer gene symbols to standard format
+#'
+#' Converts gene symbols to uppercase and handles common naming variations.
+#'
+#' @param symbols Character vector of gene symbols
+#' @return Character vector of standardized gene symbols
+#' @keywords internal
+.transfer_symbol <- function(symbols) {
+    # Convert to uppercase for consistency
+    symbols <- toupper(symbols)
+    
+    # Remove version numbers (e.g., "GENE.1" -> "GENE")
+    symbols <- gsub("\\.\\d+$", "", symbols)
+    
+    symbols
+}
+
+
+#' Remove duplicate rows by keeping the one with highest mean
+#'
+#' When multiple rows have the same gene name, keeps the row with
+#' the highest mean expression value.
+#'
+#' @param mat Expression matrix with gene names as rownames
+#' @return Matrix with unique row names
+#' @keywords internal
+.rm_duplicates <- function(mat) {
+    if (!any(duplicated(rownames(mat)))) {
+        return(mat)
+    }
+    
+    # Calculate row means
+    if (inherits(mat, "dgCMatrix") || inherits(mat, "sparseMatrix")) {
+        row_means <- Matrix::rowMeans(mat)
+    } else {
+        row_means <- rowMeans(mat)
+    }
+    
+    # For each unique gene, keep the row with highest mean
+    unique_genes <- unique(rownames(mat))
+    keep_idx <- sapply(unique_genes, function(gene) {
+        idx <- which(rownames(mat) == gene)
+        if (length(idx) == 1) return(idx)
+        idx[which.max(row_means[idx])]
+    })
+    
+    mat[keep_idx, , drop = FALSE]
+}
+
+
+#' Sweep operation for sparse matrices
+#'
+#' Applies a sweep operation to sparse matrices without converting to dense.
+#'
+#' @param x Sparse matrix
+#' @param MARGIN 1 for rows, 2 for columns
+#' @param STATS Vector of statistics to apply
+#' @param FUN Function to apply (typically "/" or "-")
+#' @return Sparse matrix with operation applied
+#' @keywords internal
+.sweep_sparse <- function(x, MARGIN, STATS, FUN = "/") {
+    if (!inherits(x, "dgCMatrix") && !inherits(x, "sparseMatrix")) {
+        return(sweep(x, MARGIN, STATS, FUN))
+    }
+    
+    if (MARGIN == 2) {
+        if (FUN == "/") {
+            # Column-wise division
+            x@x <- x@x / rep(STATS, diff(x@p))
+        } else if (FUN == "-") {
+            # Column-wise subtraction - need to handle differently
+            x <- as(x, "dgCMatrix")
+            for (j in seq_along(STATS)) {
+                idx <- (x@p[j] + 1):x@p[j + 1]
+                if (length(idx) > 0) {
+                    x@x[idx] <- x@x[idx] - STATS[j]
+                }
+            }
+        }
+    } else if (MARGIN == 1) {
+        if (FUN == "/") {
+            # Row-wise division - less efficient for CSC format
+            x <- t(.sweep_sparse(t(x), 2, STATS, FUN))
+        } else if (FUN == "-") {
+            x <- t(.sweep_sparse(t(x), 2, STATS, FUN))
+        }
+    }
+    
+    x
+}
+
+
+# ==============================================================================
+# SECTION 9: SPATIAL TRANSCRIPTOMICS ACTIVITY INFERENCE
+# ==============================================================================
+
+#' Spot Activity Inference from Spatial Transcriptomics Data
+#'
+#' Calculate secreted protein signaling activity of spots from spatial
+#' transcriptomics data. Supports SpaCET objects and raw count matrices.
+#'
+#' @param inputProfile Either a SpaCET object or a gene expression count matrix
+#'   (genes x spots). If a matrix, rownames should be gene symbols.
+#' @param inputProfile_control Optional control expression data. Either a SpaCET
+#'   object or a count matrix. If NULL, uses mean of inputProfile as control.
+#' @param scale.factor Sets the scale factor for spot-level normalization
+#'   (default: 1e+05, i.e., counts per 100K).
+#' @param sigMatrix Secreted protein signature matrix path or "SecAct" for default.
+#' @param is.group.sig Logical indicating whether to group similar signatures
+#'   (default: TRUE).
+#' @param is.group.cor Correlation cutoff for signature grouping (default: 0.9).
+#' @param lambda Ridge penalty factor (default: 5e+05).
+#' @param nrand Number of permutations (default: 1000).
+#' @param sigFilter Logical indicating whether to filter signatures by available
+#'   genes (default: FALSE).
+#' @param ncores Number of CPU cores for parallel processing (default: auto).
+#' @param method Which implementation to use: "legacy", "old", "old2", "new", "new2"
+#'   (default: "new").
+#' @param return.SpaCET If inputProfile is a SpaCET object, whether to return
+#'   the modified SpaCET object (TRUE) or just the results list (FALSE).
+#'   Default: TRUE.
+#'
+#' @return If inputProfile is a SpaCET object and return.SpaCET is TRUE, returns
+#'   the SpaCET object with results stored in
+#'   \code{inputProfile@results$SecAct_output$SecretedProteinActivity}.
+#'   Otherwise, returns a named list with beta, se, zscore, pvalue matrices.
+#'
+#' @details
+#' This function performs the following steps:
+#' \enumerate{
+#'   \item Extract count matrix from SpaCET object (if applicable)
+#'   \item Normalize to counts per scale.factor (similar to TPM)
+#'   \item Log2 transform: log2(normalized + 1)
+#'   \item Compute differential expression vs control
+#'   \item Run ridge regression activity inference
+#' }
+#'
+#' For large spatial datasets, the function uses sparse matrix operations
+#' where possible to minimize memory usage.
+#'
+#' @examples
+#' \dontrun{
+#' # With a count matrix
+#' counts <- matrix(rpois(10000 * 1000, lambda = 5), nrow = 10000, ncol = 1000)
+#' rownames(counts) <- paste0("Gene", 1:10000)
+#' colnames(counts) <- paste0("Spot", 1:1000)
+#'
+#' res <- SecAct.activity.inference.ST(counts, nrand = 100)
+#' head(res$zscore)
+#'
+#' # With a SpaCET object
+#' spacet_obj <- SecAct.activity.inference.ST(spacet_obj, nrand = 1000)
+#' }
+#'
+#' @export
+SecAct.activity.inference.ST <- function(
+    inputProfile,
+    inputProfile_control = NULL,
+    scale.factor = 1e+05,
+    sigMatrix = "SecAct",
+    is.group.sig = TRUE,
+    is.group.cor = 0.9,
+    lambda = 5e+05,
+    nrand = 1000,
+    sigFilter = FALSE,
+    ncores = NULL,
+    method = "new",
+    return.SpaCET = TRUE
+) {
+    # Check if input is a SpaCET object
+    is_spacet <- inherits(inputProfile, "SpaCET")
+    
+    if (is_spacet) {
+        # Extract count matrix from SpaCET object
+        expr <- inputProfile@input$counts
+        expr <- expr[Matrix::rowSums(expr) > 0, ]
+        rownames(expr) <- .transfer_symbol(rownames(expr))
+        expr <- .rm_duplicates(expr)
+    } else {
+        # Assume inputProfile is a count matrix
+        if (inherits(inputProfile, "sparseMatrix") || inherits(inputProfile, "dgCMatrix")) {
+            expr <- inputProfile
+            expr <- expr[Matrix::rowSums(expr) > 0, ]
+        } else {
+            expr <- as.matrix(inputProfile)
+            expr <- expr[rowSums(expr) > 0, ]
+        }
+        rownames(expr) <- .transfer_symbol(rownames(expr))
+        expr <- .rm_duplicates(expr)
+    }
+    
+    # Normalize to counts per scale.factor
+    if (inherits(expr, "sparseMatrix") || inherits(expr, "dgCMatrix")) {
+        stats <- Matrix::colSums(expr)
+        expr <- .sweep_sparse(expr, 2, stats, "/")
+        expr@x <- expr@x * scale.factor
+        # Log2 transform
+        expr@x <- log2(expr@x + 1)
+    } else {
+        stats <- colSums(expr)
+        expr <- sweep(expr, 2, stats, "/") * scale.factor
+        # Log2 transform
+        expr <- log2(expr + 1)
+    }
+    
+    # Compute differential expression
+    if (is.null(inputProfile_control)) {
+        # Use mean of inputProfile as control
+        if (inherits(expr, "sparseMatrix") || inherits(expr, "dgCMatrix")) {
+            expr.diff <- expr - Matrix::rowMeans(expr)
+        } else {
+            expr.diff <- expr - rowMeans(expr)
+        }
+    } else {
+        # Process control expression
+        if (inherits(inputProfile_control, "SpaCET")) {
+            expr_control <- inputProfile_control@input$counts
+            expr_control <- expr_control[Matrix::rowSums(expr_control) > 0, ]
+            rownames(expr_control) <- .transfer_symbol(rownames(expr_control))
+            expr_control <- .rm_duplicates(expr_control)
+        } else {
+            if (inherits(inputProfile_control, "sparseMatrix") || 
+                inherits(inputProfile_control, "dgCMatrix")) {
+                expr_control <- inputProfile_control
+                expr_control <- expr_control[Matrix::rowSums(expr_control) > 0, ]
+            } else {
+                expr_control <- as.matrix(inputProfile_control)
+                expr_control <- expr_control[rowSums(expr_control) > 0, ]
+            }
+            rownames(expr_control) <- .transfer_symbol(rownames(expr_control))
+            expr_control <- .rm_duplicates(expr_control)
+        }
+        
+        # Normalize control
+        if (inherits(expr_control, "sparseMatrix") || inherits(expr_control, "dgCMatrix")) {
+            stats <- Matrix::colSums(expr_control)
+            expr_control <- .sweep_sparse(expr_control, 2, stats, "/")
+            expr_control@x <- expr_control@x * scale.factor
+            expr_control@x <- log2(expr_control@x + 1)
+        } else {
+            stats <- colSums(expr_control)
+            expr_control <- sweep(expr_control, 2, stats, "/") * scale.factor
+            expr_control <- log2(expr_control + 1)
+        }
+        
+        # Find overlapping genes and compute difference
+        olp <- intersect(rownames(expr), rownames(expr_control))
+        if (inherits(expr, "sparseMatrix") || inherits(expr, "dgCMatrix")) {
+            expr.diff <- expr[olp, ] - Matrix::rowMeans(expr_control[olp, ])
+        } else {
+            expr.diff <- expr[olp, ] - rowMeans(expr_control[olp, ])
+        }
+    }
+    
+    # Convert sparse to dense for ridge regression (if small enough)
+    if (inherits(expr.diff, "sparseMatrix") || inherits(expr.diff, "dgCMatrix")) {
+        expr.diff <- as.matrix(expr.diff)
+    }
+    
+    # Run activity inference
+    res <- SecAct.activity.inference(
+        inputProfile = expr.diff,
+        is.differential = TRUE,
+        sigMatrix = sigMatrix,
+        is.group.sig = is.group.sig,
+        is.group.cor = is.group.cor,
+        lambda = lambda,
+        nrand = nrand,
+        sigFilter = sigFilter,
+        ncores = ncores,
+        method = method
+    )
+    
+    # Return results
+    if (is_spacet && return.SpaCET) {
+        # Store results in SpaCET object
+        if (is.null(inputProfile@results)) {
+            inputProfile@results <- list()
+        }
+        if (is.null(inputProfile@results$SecAct_output)) {
+            inputProfile@results$SecAct_output <- list()
+        }
+        inputProfile@results$SecAct_output$SecretedProteinActivity <- res
+        return(inputProfile)
+    } else {
+        return(res)
+    }
+}
+
+
+#' Cell State Activity Inference from Single Cell RNA-seq Data
+#'
+#' Calculate secreted protein signaling activity of cell states from
+#' single cell RNA-Sequencing data. Supports Seurat objects.
+#'
+#' @param inputProfile A Seurat object.
+#' @param cellType_meta Column name in meta.data containing cell-type annotations.
+#' @param sigMatrix Secreted protein signature matrix path or "SecAct" for default.
+#' @param is.singleCellLevel Logical indicating whether to calculate activity
+#'   for each single cell (TRUE) or aggregate by cell type (FALSE, default).
+#' @param is.group.sig Logical indicating whether to group similar signatures.
+#' @param is.group.cor Correlation cutoff for signature grouping.
+#' @param lambda Ridge penalty factor.
+#' @param nrand Number of permutations.
+#' @param sigFilter Logical indicating whether to filter signatures.
+#' @param ncores Number of CPU cores for parallel processing.
+#' @param method Which implementation to use.
+#' @param return.Seurat Whether to return the modified Seurat object (TRUE)
+#'   or just the results list (FALSE).
+#'
+#' @return If return.Seurat is TRUE, returns the Seurat object with results
+#'   stored in \code{inputProfile@misc$SecAct_output$SecretedProteinActivity}.
+#'   Otherwise, returns a named list with beta, se, zscore, pvalue matrices.
+#'
+#' @export
+SecAct.activity.inference.scRNAseq <- function(
+    inputProfile,
+    cellType_meta,
+    sigMatrix = "SecAct",
+    is.singleCellLevel = FALSE,
+    is.group.sig = TRUE,
+    is.group.cor = 0.9,
+    lambda = 5e+05,
+    nrand = 1000,
+    sigFilter = FALSE,
+    ncores = NULL,
+    method = "new",
+    return.Seurat = TRUE
+) {
+    # Check if input is a Seurat object
+    if (!inherits(inputProfile, "Seurat")) {
+        stop("Please input a Seurat object.")
+    }
+    
+    # Extract count matrix - handle Seurat v5 (Assay5) vs older versions
+    if (inherits(inputProfile@assays$RNA, "Assay5")) {
+        counts <- inputProfile@assays$RNA@layers$counts
+        colnames(counts) <- rownames(inputProfile@assays$RNA@cells)
+        rownames(counts) <- rownames(inputProfile@assays$RNA@features)
+    } else {
+        counts <- inputProfile@assays$RNA@counts
+    }
+    
+    # Standardize gene symbols
+    rownames(counts) <- .transfer_symbol(rownames(counts))
+    counts <- .rm_duplicates(counts)
+    
+    if (!is.singleCellLevel) {
+        # Generate pseudo-bulk by cell type
+        cellType_vec <- inputProfile@meta.data[, cellType_meta]
+        
+        expr <- data.frame(row.names = rownames(counts))
+        for (cellType in sort(unique(cellType_vec))) {
+            cells_idx <- which(cellType_vec == cellType)
+            if (inherits(counts, "sparseMatrix") || inherits(counts, "dgCMatrix")) {
+                expr[, cellType] <- Matrix::rowSums(counts[, cells_idx, drop = FALSE])
+            } else {
+                expr[, cellType] <- rowSums(counts[, cells_idx, drop = FALSE])
+            }
+        }
+        
+        # Normalize to TPM (counts per million)
+        if (inherits(expr, "sparseMatrix") || inherits(expr, "dgCMatrix")) {
+            expr <- sweep(as.matrix(expr), 2, colSums(expr), "/") * 1e6
+        } else {
+            expr <- sweep(expr, 2, colSums(expr), "/") * 1e6
+        }
+    } else {
+        # Single cell level - normalize per cell
+        if (inherits(counts, "sparseMatrix") || inherits(counts, "dgCMatrix")) {
+            stats <- Matrix::colSums(counts)
+            expr <- .sweep_sparse(counts, 2, stats, "/")
+            expr@x <- expr@x * 1e5
+            expr <- as.matrix(expr)
+        } else {
+            expr <- sweep(counts, 2, colSums(counts), "/") * 1e5
+        }
+    }
+    rm(counts)
+    gc()
+    
+    # Log2 transform
+    expr <- log2(expr + 1)
+    
+    # Compute differential expression (vs mean)
+    expr.diff <- expr - rowMeans(expr)
+    rm(expr)
+    gc()
+    
+    # Run activity inference
+    res <- SecAct.activity.inference(
+        inputProfile = expr.diff,
+        is.differential = TRUE,
+        sigMatrix = sigMatrix,
+        is.group.sig = is.group.sig,
+        is.group.cor = is.group.cor,
+        lambda = lambda,
+        nrand = nrand,
+        sigFilter = sigFilter,
+        ncores = ncores,
+        method = method
+    )
+    
+    # Return results
+    if (return.Seurat) {
+        if (is.null(inputProfile@misc)) {
+            inputProfile@misc <- list()
+        }
+        if (is.null(inputProfile@misc$SecAct_output)) {
+            inputProfile@misc$SecAct_output <- list()
+        }
+        inputProfile@misc$SecAct_output$SecretedProteinActivity <- res
+        return(inputProfile)
+    } else {
+        return(res)
+    }
 }
