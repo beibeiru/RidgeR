@@ -15,8 +15,10 @@
  *
  * Dependencies: GSL (GNU Scientific Library), OpenMP (optional)
  *
- * Note: Uses GSL's Mersenne Twister RNG for cross-platform reproducibility.
- *       Results will be identical on Linux, macOS, and other platforms.
+ * RNG: All versions use GSL's Mersenne Twister (MT19937) for cross-platform
+ *      reproducibility. Results will be identical on Linux, macOS, and other
+ *      platforms. Note: Results will differ from original SecAct which uses
+ *      platform-specific rand().
  *
  * =============================================================================
  */
@@ -43,9 +45,8 @@
  * SECTION 1: RANDOM NUMBER GENERATION
  * =============================================================================
  *
- * Two RNG options:
- * - Native rand(): matches original SecAct exactly (platform-specific)
- * - GSL MT19937: cross-platform reproducible (different from SecAct)
+ * GSL MT19937 is used for cross-platform reproducibility.
+ * Native rand() implementation is kept for reference but unused.
  */
 
 /**
@@ -313,8 +314,8 @@ void ridgeReg(double *X_vec, double *Y_vec,
     /* beta = (X'X + lambda*I)^-1 * X' * Y */
     gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, Y, 0.0, beta);
 
-    /* Permutation testing - use native rand() for exact SecAct compatibility */
-    int *perm_table = generate_permutation_table_native(n, nrand);
+    /* Permutation testing - use GSL RNG for cross-platform reproducibility */
+    int *perm_table = generate_permutation_table(n, nrand, 0);
     gsl_matrix_set_zero(aver);
     gsl_matrix_set_zero(aver_sq);
     gsl_matrix_set_zero(pvalue);
@@ -453,7 +454,7 @@ SEXP ridgeReg_old_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp, SEXP nra
     /* Copy beta to output */
     memcpy(bv, beta->data, len * sizeof(double));
 
-    /* Permutation testing */
+    /* Permutation testing - use GSL RNG for cross-platform reproducibility */
     int *perm_table = generate_permutation_table(n, nrand, 0);
     gsl_matrix_set_zero(aver);
     gsl_matrix_set_zero(aver_sq);
@@ -576,7 +577,7 @@ SEXP ridgeRegTperm_old_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp, SEX
     /* Prepare T transpose for permutation */
     gsl_matrix_transpose_memcpy(Tt_orig, T);
 
-    /* Permutation testing with T-column permutation */
+    /* Permutation testing - use GSL RNG for cross-platform reproducibility */
     int *perm_table = generate_permutation_table(n, nrand, 0);
     gsl_matrix_set_zero(aver);
     gsl_matrix_set_zero(aver_sq);
@@ -696,7 +697,7 @@ SEXP ridgeRegFast_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp,
     gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, Y, 0.0, beta);
     memcpy(bv, beta->data, len * sizeof(double));
 
-    /* Prepare permutation table */
+    /* Prepare permutation table - use GSL RNG for cross-platform reproducibility */
     int *perm_table = generate_permutation_table(n, nrand, 0);
 
     /* Determine actual thread count */
@@ -857,7 +858,7 @@ SEXP ridgeRegTperm_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp,
     /* Prepare T transpose for permutation */
     gsl_matrix_transpose_memcpy(Tt_orig, T);
 
-    /* Prepare permutation table */
+    /* Prepare permutation table - use GSL RNG for cross-platform reproducibility */
     int *perm_table = generate_permutation_table(n, nrand, 0);
 
     /* Determine actual thread count */
