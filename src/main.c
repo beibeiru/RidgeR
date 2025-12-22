@@ -32,6 +32,7 @@
 
 #include <string.h>
 #include <math.h>
+#include <stdlib.h>
 
 #ifdef _OPENMP
     #include <omp.h>
@@ -39,31 +40,31 @@
 
 
 /* =============================================================================
- * SECTION 1: PORTABLE RANDOM NUMBER GENERATION
+ * SECTION 1: RANDOM NUMBER GENERATION
  * =============================================================================
  *
- * Uses GSL's Mersenne Twister (MT19937) for cross-platform reproducibility.
- * The standard library rand() produces different sequences on Linux vs macOS.
+ * Two RNG options:
+ * - Native rand(): matches original SecAct exactly (platform-specific)
+ * - GSL MT19937: cross-platform reproducible (different from SecAct)
  */
 
 /**
- * Fisher-Yates shuffle using GSL RNG (in-place)
- *
- * Matches the original algorithm's direction exactly:
- *   for i = 0 to n-2: swap array[i] with array[j] where j in [i, n-1]
- *
- * This is critical for reproducibility - the reverse direction
- * (i = n-1 down to 1) produces different permutation sequences
- * even with identical random numbers.
- *
- * @param rng    GSL random number generator
- * @param array  Integer array to shuffle
- * @param n      Length of array
+ * Fisher-Yates shuffle using native rand() - matches original SecAct
  */
-static void shuffle_array(gsl_rng *rng, int *array, int n) {
+static void shuffle_array_native(int *array, int n) {
     for (int i = 0; i < n - 1; i++) {
-        /* j in range [i, n-1], matching original formula:
-         * j = i + rand() / (RAND_MAX / (n - i) + 1) */
+        int j = i + rand() / (RAND_MAX / (n - i) + 1);
+        int tmp = array[j];
+        array[j] = array[i];
+        array[i] = tmp;
+    }
+}
+
+/**
+ * Fisher-Yates shuffle using GSL RNG - cross-platform reproducible
+ */
+static void shuffle_array_gsl(gsl_rng *rng, int *array, int n) {
+    for (int i = 0; i < n - 1; i++) {
         int j = i + (int)gsl_rng_uniform_int(rng, (unsigned long)(n - i));
         int tmp = array[j];
         array[j] = array[i];
@@ -73,34 +74,48 @@ static void shuffle_array(gsl_rng *rng, int *array, int n) {
 
 
 /**
- * Generate a table of random permutations (matching original cumulative behavior)
- *
- * The original code shuffles the same array cumulatively across iterations,
- * meaning each permutation is a shuffle of the previous permutation's result.
- * This function replicates that exact behavior for backward compatibility.
- *
- * @param n      Number of elements per permutation
- * @param nrand  Number of permutations to generate
- * @param seed   Random seed for reproducibility
- * @return       Flat array of size nrand * n (caller must free)
+ * Generate permutation table using native rand() - for SecAct compatibility
+ */
+static int* generate_permutation_table_native(int n, int nrand) {
+    size_t table_size = (size_t)nrand * (size_t)n;
+    int *table = (int*)malloc(table_size * sizeof(int));
+    int *array = (int*)malloc((size_t)n * sizeof(int));
+
+    /* Same seed as original SecAct */
+    srand(0);
+
+    for (int i = 0; i < n; i++) {
+        array[i] = i;
+    }
+
+    /* Cumulative shuffle - matches original SecAct behavior */
+    for (int perm = 0; perm < nrand; perm++) {
+        shuffle_array_native(array, n);
+        memcpy(table + ((size_t)perm * n), array, n * sizeof(int));
+    }
+
+    free(array);
+    return table;
+}
+
+
+/**
+ * Generate permutation table using GSL RNG - for cross-platform reproducibility
  */
 static int* generate_permutation_table(int n, int nrand, unsigned long seed) {
     size_t table_size = (size_t)nrand * (size_t)n;
     int *table = (int*)malloc(table_size * sizeof(int));
     int *array = (int*)malloc((size_t)n * sizeof(int));
 
-    /* Initialize GSL Mersenne Twister RNG */
     gsl_rng *rng = gsl_rng_alloc(gsl_rng_mt19937);
     gsl_rng_set(rng, seed);
 
-    /* Initialize index array */
     for (int i = 0; i < n; i++) {
         array[i] = i;
     }
 
-    /* Cumulative shuffle: each iteration shuffles the previous result */
     for (int perm = 0; perm < nrand; perm++) {
-        shuffle_array(rng, array, n);
+        shuffle_array_gsl(rng, array, n);
         memcpy(table + ((size_t)perm * n), array, n * sizeof(int));
     }
 
@@ -252,6 +267,7 @@ static void finalize_permutation_stats(const double *bv, double *sv, double *zv,
  *
  * Original implementation using R's .C() interface.
  * Single-threaded with Y-row permutation strategy.
+ * This version matches the original SecAct C code exactly.
  */
 
 void ridgeReg(double *X_vec, double *Y_vec,
@@ -259,104 +275,123 @@ void ridgeReg(double *X_vec, double *Y_vec,
               double *lambda_ptr, double *nrand_ptr,
               double *beta_vec, double *se_vec, double *zscore_vec, double *pvalue_vec) {
 
-    /* Extract dimensions */
-    size_t n = (size_t)*n_ptr;  /* Number of samples */
-    size_t p = (size_t)*p_ptr;  /* Number of predictors (proteins) */
-    size_t m = (size_t)*m_ptr;  /* Number of responses (samples in Y) */
+    /* Extract dimensions - same as original */
+    int n = *n_ptr;       /* Number of genes (rows) */
+    int p = *p_ptr;       /* Number of proteins (columns of X) */
+    int m = *m_ptr;       /* Number of samples (columns of Y) */
     int nrand = (int)*nrand_ptr;
     double lambda = *lambda_ptr;
-    size_t total_elements = p * m;
+    size_t total_elements = (size_t)p * (size_t)m;
 
-    /* Wrap R vectors as GSL matrices */
-    gsl_matrix *Xt = wrap_r_vector_as_gsl_matrix(X_vec, p, n);   /* X transposed */
-    gsl_matrix *Yt = wrap_r_vector_as_gsl_matrix(Y_vec, m, n);   /* Y transposed */
-    gsl_matrix *beta = wrap_r_vector_as_gsl_matrix(beta_vec, p, m);
+    /* Wrap R vectors as GSL matrices - SAME DIMENSIONS AS ORIGINAL */
+    gsl_matrix *X = wrap_r_vector_as_gsl_matrix(X_vec, (size_t)n, (size_t)p);
+    gsl_matrix *Y = wrap_r_vector_as_gsl_matrix(Y_vec, (size_t)n, (size_t)m);
+    gsl_matrix *beta = wrap_r_vector_as_gsl_matrix(beta_vec, (size_t)p, (size_t)m);
+    gsl_matrix *aver_sq = wrap_r_vector_as_gsl_matrix(se_vec, (size_t)p, (size_t)m);
+    gsl_matrix *zscore = wrap_r_vector_as_gsl_matrix(zscore_vec, (size_t)p, (size_t)m);
+    gsl_matrix *pvalue = wrap_r_vector_as_gsl_matrix(pvalue_vec, (size_t)p, (size_t)m);
 
     /* Allocate working matrices */
-    gsl_matrix *I = gsl_matrix_alloc(p, p);
-    gsl_matrix *T = gsl_matrix_alloc(p, n);
-    gsl_matrix *Yr = gsl_matrix_alloc(n, m);      /* Y in row-major form */
-    gsl_matrix *Yp = gsl_matrix_alloc(n, m);      /* Permuted Y */
-    gsl_matrix *br = gsl_matrix_alloc(p, m);      /* Permuted beta */
-    gsl_matrix *sum_beta = gsl_matrix_alloc(p, m);
-    gsl_matrix *sum_beta_sq = gsl_matrix_alloc(p, m);
+    gsl_matrix *I = gsl_matrix_alloc((size_t)p, (size_t)p);
+    gsl_matrix *T = gsl_matrix_alloc((size_t)p, (size_t)n);
+    gsl_matrix *Y_rand = gsl_matrix_alloc((size_t)n, (size_t)m);
+    gsl_matrix *beta_rand = gsl_matrix_alloc((size_t)p, (size_t)m);
+    gsl_matrix *aver = gsl_matrix_alloc((size_t)p, (size_t)m);
 
-    /* Compute projection matrix and observed beta */
-    compute_projection_matrix(Xt, lambda, I, T);
-    gsl_matrix_transpose_memcpy(Yr, Yt);
-    gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, Yr, 0.0, beta);
+    /* Compute beta = (X'X + lambda*I)^-1 * X' * Y */
+    /* I = (X'X + lambda*I) */
+    gsl_matrix_set_identity(I);
+    gsl_blas_dsyrk(CblasLower, CblasTrans, 1.0, X, lambda, I);
 
-    /* Initialize accumulators */
-    int *perm_table = generate_permutation_table((int)n, nrand, 0);
-    gsl_matrix_set_zero(sum_beta);
-    gsl_matrix_set_zero(sum_beta_sq);
-    for (size_t i = 0; i < total_elements; i++) {
-        pvalue_vec[i] = 0.0;
-    }
+    /* I = (X'X + lambda*I)^-1 */
+    gsl_linalg_cholesky_decomp(I);
+    gsl_linalg_cholesky_invert(I);
 
-    /* Permutation loop */
-    for (int perm = 0; perm < nrand; perm++) {
-        int *perm_indices = perm_table + (perm * n);
+    /* T = (X'X + lambda*I)^-1 * X' */
+    gsl_blas_dgemm(CblasNoTrans, CblasTrans, 1.0, I, X, 0.0, T);
 
-        /* Apply permutation to Y rows */
-        for (size_t row = 0; row < n; row++) {
-            memcpy(Yp->data + (row * m),
-                   Yr->data + ((size_t)perm_indices[row] * m),
-                   m * sizeof(double));
+    /* beta = (X'X + lambda*I)^-1 * X' * Y */
+    gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, Y, 0.0, beta);
+
+    /* Permutation testing - use native rand() for exact SecAct compatibility */
+    int *perm_table = generate_permutation_table_native(n, nrand);
+    gsl_matrix_set_zero(aver);
+    gsl_matrix_set_zero(aver_sq);
+    gsl_matrix_set_zero(pvalue);
+
+    for (int i = 0; i < nrand; i++) {
+        int *perm_idx = perm_table + ((size_t)i * (size_t)n);
+
+        /* Create randomized Y by permuting rows */
+        for (int j = 0; j < n; j++) {
+            gsl_vector_const_view row = gsl_matrix_const_row(Y, perm_idx[j]);
+            gsl_matrix_set_row(Y_rand, j, &row.vector);
         }
 
         /* Compute permuted coefficients */
-        gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, Yp, 0.0, br);
+        gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, Y_rand, 0.0, beta_rand);
 
-        /* Accumulate statistics */
+        /* P-value comparison */
         for (size_t j = 0; j < total_elements; j++) {
-            if (fabs(br->data[j]) >= fabs(beta->data[j])) {
-                pvalue_vec[j]++;
+            if (fabs(beta_rand->data[j]) >= fabs(beta->data[j])) {
+                pvalue->data[j]++;
             }
         }
-        gsl_matrix_add(sum_beta, br);
-        gsl_matrix_mul_elements(br, br);
-        gsl_matrix_add(sum_beta_sq, br);
+
+        /* Accumulate for variance calculation */
+        gsl_matrix_add(aver, beta_rand);
+        gsl_matrix_mul_elements(beta_rand, beta_rand);
+        gsl_matrix_add(aver_sq, beta_rand);
     }
 
-    /* Finalize statistics */
-    double inv_nrand = 1.0 / nrand;
+    /* Finalize statistics - matching original exactly */
+    gsl_matrix_scale(aver, 1.0 / nrand);
+    gsl_matrix_scale(aver_sq, 1.0 / nrand);
+    gsl_matrix_add_constant(pvalue, 1.0);
+    int nrand1 = nrand + 1;
+    gsl_matrix_scale(pvalue, 1.0 / nrand1);
+
+    /* Compute z-score */
+    gsl_matrix_memcpy(zscore, beta);
+    gsl_matrix_sub(zscore, aver);
+    gsl_matrix_mul_elements(aver, aver);
+    gsl_matrix_sub(aver_sq, aver);
     for (size_t i = 0; i < total_elements; i++) {
-        pvalue_vec[i] = (pvalue_vec[i] + 1.0) / (nrand + 1.0);
-        double mean = sum_beta->data[i] * inv_nrand;
-        double var = (sum_beta_sq->data[i] * inv_nrand) - (mean * mean);
-        double std = sqrt(fmax(0.0, var));
-        se_vec[i] = std;
-        zscore_vec[i] = (std > 1e-12) ? (beta_vec[i] - mean) / std : 0.0;
+        aver_sq->data[i] = sqrt(aver_sq->data[i]);
     }
+    gsl_matrix_div_elements(zscore, aver_sq);
 
     /* Cleanup */
     free(perm_table);
     gsl_matrix_free(I);
     gsl_matrix_free(T);
-    gsl_matrix_free(Yr);
-    gsl_matrix_free(Yp);
-    gsl_matrix_free(br);
-    gsl_matrix_free(sum_beta);
-    gsl_matrix_free(sum_beta_sq);
-    gsl_matrix_partial_free(Xt);
-    gsl_matrix_partial_free(Yt);
+    gsl_matrix_free(Y_rand);
+    gsl_matrix_free(beta_rand);
+    gsl_matrix_free(aver);
+    gsl_matrix_partial_free(X);
+    gsl_matrix_partial_free(Y);
     gsl_matrix_partial_free(beta);
+    gsl_matrix_partial_free(aver_sq);
+    gsl_matrix_partial_free(zscore);
+    gsl_matrix_partial_free(pvalue);
 }
 
 
 /* =============================================================================
  * SECTION 5: VERSION 1 - SINGLE-THREADED Y-PERMUTATION (.Call)
  * =============================================================================
+ *
+ * Uses same algorithm as legacy but with .Call interface.
+ * R passes non-transposed matrices, C handles the layout conversion.
  */
 
 SEXP ridgeReg_old_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp, SEXP nrand_sexp) {
 
-    /* Extract dimensions */
+    /* Extract dimensions - R matrices are n×p and n×m */
     SEXP x_dim = getAttrib(X_sexp, R_DimSymbol);
-    size_t n = (size_t)INTEGER(x_dim)[0];
-    size_t p = (size_t)INTEGER(x_dim)[1];
-    size_t m = (size_t)INTEGER(getAttrib(Y_sexp, R_DimSymbol))[1];
+    int n = INTEGER(x_dim)[0];  /* Number of genes (rows) */
+    int p = INTEGER(x_dim)[1];  /* Number of proteins (columns) */
+    int m = INTEGER(getAttrib(Y_sexp, R_DimSymbol))[1];  /* Number of samples */
     int nrand = asInteger(nrand_sexp);
     double lambda = asReal(lambda_sexp);
     R_xlen_t len = (R_xlen_t)p * m;
@@ -372,61 +407,101 @@ SEXP ridgeReg_old_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp, SEXP nra
     double *zv = REAL(zscore_sexp);
     double *pv = REAL(pvalue_sexp);
 
+    memset(bv, 0, len * sizeof(double));
     memset(pv, 0, len * sizeof(double));
     memset(sv, 0, len * sizeof(double));
     memset(zv, 0, len * sizeof(double));
 
-    /* Create GSL views of input matrices */
-    gsl_matrix_view Xt = gsl_matrix_view_array(REAL(X_sexp), p, n);
-    gsl_matrix_view Yt = gsl_matrix_view_array(REAL(Y_sexp), m, n);
+    /* 
+     * R stores matrices in column-major order.
+     * For an R matrix X (n×p), the data layout is: X[,1], X[,2], ..., X[,p]
+     * 
+     * If we create gsl_matrix_view_array(data, p, n), GSL interprets this as
+     * a row-major p×n matrix, which gives us X^T.
+     * 
+     * So: Xt in GSL = X^T in mathematical terms
+     */
+    gsl_matrix_view Xt = gsl_matrix_view_array(REAL(X_sexp), p, n);  /* X^T: p×n */
+    gsl_matrix_view Yt = gsl_matrix_view_array(REAL(Y_sexp), m, n);  /* Y^T: m×n */
 
     /* Allocate working matrices */
     gsl_matrix *I = gsl_matrix_alloc(p, p);
     gsl_matrix *T = gsl_matrix_alloc(p, n);
-    gsl_matrix *Yr = gsl_matrix_alloc(n, m);
-    gsl_matrix *Yp = gsl_matrix_alloc(n, m);
-    gsl_matrix *br = gsl_matrix_alloc(p, m);
+    gsl_matrix *Y = gsl_matrix_alloc(n, m);      /* Will hold Y (not transposed) */
+    gsl_matrix *Y_rand = gsl_matrix_alloc(n, m);
+    gsl_matrix *beta = gsl_matrix_alloc(p, m);
+    gsl_matrix *beta_rand = gsl_matrix_alloc(p, m);
+    gsl_matrix *aver = gsl_matrix_alloc(p, m);
+    gsl_matrix *aver_sq = gsl_matrix_alloc(p, m);
 
-    /* Compute projection matrix and observed beta */
-    compute_projection_matrix(&Xt.matrix, lambda, I, T);
-    gsl_matrix_transpose_memcpy(Yr, &Yt.matrix);
-    gsl_matrix_view beta_view = gsl_matrix_view_array(bv, p, m);
-    gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, Yr, 0.0, &beta_view.matrix);
+    /* Compute I = (X^T X + lambda*I)^{-1} */
+    /* Xt is p×n, so Xt * Xt^T = X^T * X = p×p */
+    gsl_matrix_set_identity(I);
+    gsl_blas_dsyrk(CblasLower, CblasNoTrans, 1.0, &Xt.matrix, lambda, I);
+    gsl_linalg_cholesky_decomp(I);
+    gsl_linalg_cholesky_invert(I);
+
+    /* T = I * Xt = (X^T X + lambda*I)^{-1} * X^T : p×n */
+    gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, I, &Xt.matrix, 0.0, T);
+
+    /* Get Y in proper orientation: transpose Yt to get Y (n×m) */
+    gsl_matrix_transpose_memcpy(Y, &Yt.matrix);
+
+    /* beta = T * Y = p×n * n×m = p×m */
+    gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, Y, 0.0, beta);
+
+    /* Copy beta to output */
+    memcpy(bv, beta->data, len * sizeof(double));
 
     /* Permutation testing */
-    int *perm_table = generate_permutation_table((int)n, nrand, 0);
+    int *perm_table = generate_permutation_table(n, nrand, 0);
+    gsl_matrix_set_zero(aver);
+    gsl_matrix_set_zero(aver_sq);
 
-    for (int perm = 0; perm < nrand; perm++) {
-        int *perm_indices = perm_table + (perm * n);
+    for (int i = 0; i < nrand; i++) {
+        int *perm_idx = perm_table + ((size_t)i * n);
 
-        /* Apply permutation */
-        for (size_t row = 0; row < n; row++) {
-            memcpy(Yp->data + (row * m),
-                   Yr->data + ((size_t)perm_indices[row] * m),
-                   m * sizeof(double));
+        /* Permute rows of Y */
+        for (int j = 0; j < n; j++) {
+            gsl_vector_const_view row = gsl_matrix_const_row(Y, perm_idx[j]);
+            gsl_matrix_set_row(Y_rand, j, &row.vector);
         }
 
-        /* Compute permuted coefficients */
-        gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, Yp, 0.0, br);
+        /* Compute permuted beta */
+        gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, Y_rand, 0.0, beta_rand);
 
         /* Accumulate statistics */
         for (R_xlen_t k = 0; k < len; k++) {
-            if (fabs(br->data[k]) >= fabs(bv[k])) pv[k]++;
-            zv[k] += br->data[k];
-            sv[k] += br->data[k] * br->data[k];
+            if (fabs(beta_rand->data[k]) >= fabs(beta->data[k])) pv[k]++;
         }
+        gsl_matrix_add(aver, beta_rand);
+        gsl_matrix_mul_elements(beta_rand, beta_rand);
+        gsl_matrix_add(aver_sq, beta_rand);
     }
 
-    /* Finalize statistics */
-    finalize_permutation_stats(bv, sv, zv, pv, len, nrand);
+    /* Finalize statistics - matching original exactly */
+    gsl_matrix_scale(aver, 1.0 / nrand);
+    gsl_matrix_scale(aver_sq, 1.0 / nrand);
+
+    /* Compute z-score and SE */
+    for (R_xlen_t k = 0; k < len; k++) {
+        pv[k] = (pv[k] + 1.0) / (nrand + 1.0);
+        double mean = aver->data[k];
+        double var = aver_sq->data[k] - mean * mean;
+        sv[k] = sqrt(var);
+        zv[k] = (sv[k] > 1e-12) ? (bv[k] - mean) / sv[k] : 0.0;
+    }
 
     /* Cleanup */
     free(perm_table);
     gsl_matrix_free(I);
     gsl_matrix_free(T);
-    gsl_matrix_free(Yr);
-    gsl_matrix_free(Yp);
-    gsl_matrix_free(br);
+    gsl_matrix_free(Y);
+    gsl_matrix_free(Y_rand);
+    gsl_matrix_free(beta);
+    gsl_matrix_free(beta_rand);
+    gsl_matrix_free(aver);
+    gsl_matrix_free(aver_sq);
 
     SEXP result = create_result_list(beta_sexp, se_sexp, zscore_sexp, pvalue_sexp);
     UNPROTECT(4);
@@ -446,9 +521,9 @@ SEXP ridgeRegTperm_old_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp, SEX
 
     /* Extract dimensions */
     SEXP x_dim = getAttrib(X_sexp, R_DimSymbol);
-    size_t n = (size_t)INTEGER(x_dim)[0];
-    size_t p = (size_t)INTEGER(x_dim)[1];
-    size_t m = (size_t)INTEGER(getAttrib(Y_sexp, R_DimSymbol))[1];
+    int n = INTEGER(x_dim)[0];
+    int p = INTEGER(x_dim)[1];
+    int m = INTEGER(getAttrib(Y_sexp, R_DimSymbol))[1];
     int nrand = asInteger(nrand_sexp);
     double lambda = asReal(lambda_sexp);
     R_xlen_t len = (R_xlen_t)p * m;
@@ -464,66 +539,93 @@ SEXP ridgeRegTperm_old_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp, SEX
     double *zv = REAL(zscore_sexp);
     double *pv = REAL(pvalue_sexp);
 
+    memset(bv, 0, len * sizeof(double));
     memset(pv, 0, len * sizeof(double));
     memset(sv, 0, len * sizeof(double));
     memset(zv, 0, len * sizeof(double));
 
-    /* Create GSL views */
+    /* Create GSL views - Xt = X^T (p×n), Yt = Y^T (m×n) */
     gsl_matrix_view Xt = gsl_matrix_view_array(REAL(X_sexp), p, n);
     gsl_matrix_view Yt = gsl_matrix_view_array(REAL(Y_sexp), m, n);
 
     /* Allocate working matrices */
     gsl_matrix *I = gsl_matrix_alloc(p, p);
     gsl_matrix *T = gsl_matrix_alloc(p, n);
-    gsl_matrix *Yr = gsl_matrix_alloc(n, m);
-    gsl_matrix *Tt_original = gsl_matrix_alloc(n, p);  /* T transposed */
-    gsl_matrix *Tt_permuted = gsl_matrix_alloc(n, p);
-    gsl_matrix *br = gsl_matrix_alloc(p, m);
+    gsl_matrix *Y = gsl_matrix_alloc(n, m);
+    gsl_matrix *Tt_orig = gsl_matrix_alloc(n, p);   /* T transposed, original */
+    gsl_matrix *Tt_perm = gsl_matrix_alloc(n, p);   /* T transposed, permuted */
+    gsl_matrix *beta = gsl_matrix_alloc(p, m);
+    gsl_matrix *beta_rand = gsl_matrix_alloc(p, m);
+    gsl_matrix *aver = gsl_matrix_alloc(p, m);
+    gsl_matrix *aver_sq = gsl_matrix_alloc(p, m);
 
-    /* Compute projection matrix and observed beta */
-    compute_projection_matrix(&Xt.matrix, lambda, I, T);
-    gsl_matrix_transpose_memcpy(Yr, &Yt.matrix);
-    gsl_matrix_view beta_view = gsl_matrix_view_array(bv, p, m);
-    gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, Yr, 0.0, &beta_view.matrix);
+    /* Compute I = (X^T X + lambda*I)^{-1} */
+    gsl_matrix_set_identity(I);
+    gsl_blas_dsyrk(CblasLower, CblasNoTrans, 1.0, &Xt.matrix, lambda, I);
+    gsl_linalg_cholesky_decomp(I);
+    gsl_linalg_cholesky_invert(I);
+
+    /* T = I * Xt : p×n */
+    gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, I, &Xt.matrix, 0.0, T);
+
+    /* Get Y and compute beta */
+    gsl_matrix_transpose_memcpy(Y, &Yt.matrix);
+    gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, Y, 0.0, beta);
+    memcpy(bv, beta->data, len * sizeof(double));
 
     /* Prepare T transpose for permutation */
-    gsl_matrix_transpose_memcpy(Tt_original, T);
+    gsl_matrix_transpose_memcpy(Tt_orig, T);
 
-    /* Permutation testing (permute T columns via scatter) */
-    int *perm_table = generate_permutation_table((int)n, nrand, 0);
+    /* Permutation testing with T-column permutation */
+    int *perm_table = generate_permutation_table(n, nrand, 0);
+    gsl_matrix_set_zero(aver);
+    gsl_matrix_set_zero(aver_sq);
 
-    for (int perm = 0; perm < nrand; perm++) {
-        int *perm_indices = perm_table + (perm * n);
+    for (int i = 0; i < nrand; i++) {
+        int *perm_idx = perm_table + ((size_t)i * n);
 
-        /* Scatter permutation: Tt_permuted[perm[i], :] = Tt_original[i, :] */
-        for (size_t i = 0; i < n; i++) {
-            memcpy(Tt_permuted->data + ((size_t)perm_indices[i] * p),
-                   Tt_original->data + (i * p),
+        /* Scatter permutation: Tt_perm[perm[j], :] = Tt_orig[j, :] */
+        for (int j = 0; j < n; j++) {
+            memcpy(Tt_perm->data + ((size_t)perm_idx[j] * p),
+                   Tt_orig->data + ((size_t)j * p),
                    p * sizeof(double));
         }
 
-        /* Compute permuted coefficients: beta = Tt_permuted' * Yr */
-        gsl_blas_dgemm(CblasTrans, CblasNoTrans, 1.0, Tt_permuted, Yr, 0.0, br);
+        /* beta_rand = Tt_perm^T * Y = T_perm * Y */
+        gsl_blas_dgemm(CblasTrans, CblasNoTrans, 1.0, Tt_perm, Y, 0.0, beta_rand);
 
         /* Accumulate statistics */
         for (R_xlen_t k = 0; k < len; k++) {
-            if (fabs(br->data[k]) >= fabs(bv[k])) pv[k]++;
-            zv[k] += br->data[k];
-            sv[k] += br->data[k] * br->data[k];
+            if (fabs(beta_rand->data[k]) >= fabs(beta->data[k])) pv[k]++;
         }
+        gsl_matrix_add(aver, beta_rand);
+        gsl_matrix_mul_elements(beta_rand, beta_rand);
+        gsl_matrix_add(aver_sq, beta_rand);
     }
 
     /* Finalize statistics */
-    finalize_permutation_stats(bv, sv, zv, pv, len, nrand);
+    gsl_matrix_scale(aver, 1.0 / nrand);
+    gsl_matrix_scale(aver_sq, 1.0 / nrand);
+
+    for (R_xlen_t k = 0; k < len; k++) {
+        pv[k] = (pv[k] + 1.0) / (nrand + 1.0);
+        double mean = aver->data[k];
+        double var = aver_sq->data[k] - mean * mean;
+        sv[k] = sqrt(var);
+        zv[k] = (sv[k] > 1e-12) ? (bv[k] - mean) / sv[k] : 0.0;
+    }
 
     /* Cleanup */
     free(perm_table);
     gsl_matrix_free(I);
     gsl_matrix_free(T);
-    gsl_matrix_free(Yr);
-    gsl_matrix_free(Tt_original);
-    gsl_matrix_free(Tt_permuted);
-    gsl_matrix_free(br);
+    gsl_matrix_free(Y);
+    gsl_matrix_free(Tt_orig);
+    gsl_matrix_free(Tt_perm);
+    gsl_matrix_free(beta);
+    gsl_matrix_free(beta_rand);
+    gsl_matrix_free(aver);
+    gsl_matrix_free(aver_sq);
 
     SEXP result = create_result_list(beta_sexp, se_sexp, zscore_sexp, pvalue_sexp);
     UNPROTECT(4);
@@ -547,9 +649,9 @@ SEXP ridgeRegFast_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp,
 
     /* Extract dimensions */
     SEXP x_dim = getAttrib(X_sexp, R_DimSymbol);
-    size_t n = (size_t)INTEGER(x_dim)[0];
-    size_t p = (size_t)INTEGER(x_dim)[1];
-    size_t m = (size_t)INTEGER(getAttrib(Y_sexp, R_DimSymbol))[1];
+    int n = INTEGER(x_dim)[0];
+    int p = INTEGER(x_dim)[1];
+    int m = INTEGER(getAttrib(Y_sexp, R_DimSymbol))[1];
     int nrand = asInteger(nrand_sexp);
     double lambda = asReal(lambda_sexp);
     R_xlen_t len = (R_xlen_t)p * m;
@@ -565,6 +667,7 @@ SEXP ridgeRegFast_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp,
     double *zv = REAL(zscore_sexp);
     double *pv = REAL(pvalue_sexp);
 
+    memset(bv, 0, len * sizeof(double));
     memset(pv, 0, len * sizeof(double));
     memset(sv, 0, len * sizeof(double));
     memset(zv, 0, len * sizeof(double));
@@ -576,16 +679,25 @@ SEXP ridgeRegFast_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp,
     /* Allocate shared working matrices */
     gsl_matrix *I = gsl_matrix_alloc(p, p);
     gsl_matrix *T = gsl_matrix_alloc(p, n);
-    gsl_matrix *Yr = gsl_matrix_alloc(n, m);
+    gsl_matrix *Y = gsl_matrix_alloc(n, m);
+    gsl_matrix *beta = gsl_matrix_alloc(p, m);
 
-    /* Compute projection matrix and observed beta */
-    compute_projection_matrix(&Xt.matrix, lambda, I, T);
-    gsl_matrix_transpose_memcpy(Yr, &Yt.matrix);
-    gsl_matrix_view beta_view = gsl_matrix_view_array(bv, p, m);
-    gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, Yr, 0.0, &beta_view.matrix);
+    /* Compute I = (X^T X + lambda*I)^{-1} */
+    gsl_matrix_set_identity(I);
+    gsl_blas_dsyrk(CblasLower, CblasNoTrans, 1.0, &Xt.matrix, lambda, I);
+    gsl_linalg_cholesky_decomp(I);
+    gsl_linalg_cholesky_invert(I);
+
+    /* T = I * Xt */
+    gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, I, &Xt.matrix, 0.0, T);
+
+    /* Get Y and compute beta */
+    gsl_matrix_transpose_memcpy(Y, &Yt.matrix);
+    gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, Y, 0.0, beta);
+    memcpy(bv, beta->data, len * sizeof(double));
 
     /* Prepare permutation table */
-    int *perm_table = generate_permutation_table((int)n, nrand, 0);
+    int *perm_table = generate_permutation_table(n, nrand, 0);
 
     /* Determine actual thread count */
     int actual_threads = 1;
@@ -598,8 +710,8 @@ SEXP ridgeRegFast_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp,
     #endif
 
     /* Allocate thread-local accumulators */
-    double *thread_sums = (double*)calloc((size_t)actual_threads * len, sizeof(double));
-    double *thread_sumsq = (double*)calloc((size_t)actual_threads * len, sizeof(double));
+    double *thread_aver = (double*)calloc((size_t)actual_threads * len, sizeof(double));
+    double *thread_aver_sq = (double*)calloc((size_t)actual_threads * len, sizeof(double));
     double *thread_counts = (double*)calloc((size_t)actual_threads * len, sizeof(double));
 
     /* Parallel permutation loop */
@@ -610,62 +722,67 @@ SEXP ridgeRegFast_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp,
             tid = omp_get_thread_num();
         #endif
 
-        /* Thread-local accumulator pointers */
-        double *my_sums = &thread_sums[(size_t)tid * len];
-        double *my_sumsq = &thread_sumsq[(size_t)tid * len];
+        double *my_aver = &thread_aver[(size_t)tid * len];
+        double *my_aver_sq = &thread_aver_sq[(size_t)tid * len];
         double *my_counts = &thread_counts[(size_t)tid * len];
 
         /* Thread-local working matrices */
-        gsl_matrix *Yp = gsl_matrix_alloc(n, m);
-        gsl_matrix *br = gsl_matrix_alloc(p, m);
+        gsl_matrix *Y_rand = gsl_matrix_alloc(n, m);
+        gsl_matrix *beta_rand = gsl_matrix_alloc(p, m);
 
         #pragma omp for schedule(dynamic)
-        for (int perm = 0; perm < nrand; perm++) {
-            int *perm_indices = perm_table + ((size_t)perm * n);
+        for (int i = 0; i < nrand; i++) {
+            int *perm_idx = perm_table + ((size_t)i * n);
 
-            /* Apply permutation */
-            for (size_t row = 0; row < n; row++) {
-                memcpy(Yp->data + (row * m),
-                       Yr->data + ((size_t)perm_indices[row] * m),
-                       m * sizeof(double));
+            /* Permute rows of Y */
+            for (int j = 0; j < n; j++) {
+                gsl_vector_const_view row = gsl_matrix_const_row(Y, perm_idx[j]);
+                gsl_matrix_set_row(Y_rand, j, &row.vector);
             }
 
-            /* Compute permuted coefficients */
-            gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, Yp, 0.0, br);
+            /* Compute permuted beta */
+            gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, Y_rand, 0.0, beta_rand);
 
             /* Accumulate statistics */
             for (R_xlen_t k = 0; k < len; k++) {
-                if (fabs(br->data[k]) >= fabs(bv[k])) my_counts[k]++;
-                my_sums[k] += br->data[k];
-                my_sumsq[k] += br->data[k] * br->data[k];
+                if (fabs(beta_rand->data[k]) >= fabs(beta->data[k])) my_counts[k]++;
+                my_aver[k] += beta_rand->data[k];
+                my_aver_sq[k] += beta_rand->data[k] * beta_rand->data[k];
             }
         }
 
-        gsl_matrix_free(Yp);
-        gsl_matrix_free(br);
+        gsl_matrix_free(Y_rand);
+        gsl_matrix_free(beta_rand);
     }
 
     /* Reduce thread-local results */
     for (int t = 0; t < actual_threads; t++) {
         size_t offset = (size_t)t * len;
-        for (R_xlen_t i = 0; i < len; i++) {
-            zv[i] += thread_sums[offset + i];
-            sv[i] += thread_sumsq[offset + i];
-            pv[i] += thread_counts[offset + i];
+        for (R_xlen_t k = 0; k < len; k++) {
+            sv[k] += thread_aver[offset + k];
+            zv[k] += thread_aver_sq[offset + k];
+            pv[k] += thread_counts[offset + k];
         }
     }
 
     /* Finalize statistics */
-    finalize_permutation_stats(bv, sv, zv, pv, len, nrand);
+    for (R_xlen_t k = 0; k < len; k++) {
+        double mean = sv[k] / nrand;
+        double var = (zv[k] / nrand) - mean * mean;
+        pv[k] = (pv[k] + 1.0) / (nrand + 1.0);
+        zv[k] = (sqrt(var) > 1e-12) ? (bv[k] - mean) / sqrt(var) : 0.0;
+        sv[k] = sqrt(var);
+    }
 
     /* Cleanup */
-    free(thread_sums);
-    free(thread_sumsq);
+    free(thread_aver);
+    free(thread_aver_sq);
     free(thread_counts);
     free(perm_table);
     gsl_matrix_free(I);
     gsl_matrix_free(T);
-    gsl_matrix_free(Yr);
+    gsl_matrix_free(Y);
+    gsl_matrix_free(beta);
 
     SEXP result = create_result_list(beta_sexp, se_sexp, zscore_sexp, pvalue_sexp);
     UNPROTECT(4);
@@ -689,9 +806,9 @@ SEXP ridgeRegTperm_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp,
 
     /* Extract dimensions */
     SEXP x_dim = getAttrib(X_sexp, R_DimSymbol);
-    size_t n = (size_t)INTEGER(x_dim)[0];
-    size_t p = (size_t)INTEGER(x_dim)[1];
-    size_t m = (size_t)INTEGER(getAttrib(Y_sexp, R_DimSymbol))[1];
+    int n = INTEGER(x_dim)[0];
+    int p = INTEGER(x_dim)[1];
+    int m = INTEGER(getAttrib(Y_sexp, R_DimSymbol))[1];
     int nrand = asInteger(nrand_sexp);
     double lambda = asReal(lambda_sexp);
     R_xlen_t len = (R_xlen_t)p * m;
@@ -707,6 +824,7 @@ SEXP ridgeRegTperm_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp,
     double *zv = REAL(zscore_sexp);
     double *pv = REAL(pvalue_sexp);
 
+    memset(bv, 0, len * sizeof(double));
     memset(pv, 0, len * sizeof(double));
     memset(sv, 0, len * sizeof(double));
     memset(zv, 0, len * sizeof(double));
@@ -718,20 +836,29 @@ SEXP ridgeRegTperm_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp,
     /* Allocate shared working matrices */
     gsl_matrix *I = gsl_matrix_alloc(p, p);
     gsl_matrix *T = gsl_matrix_alloc(p, n);
-    gsl_matrix *Yr = gsl_matrix_alloc(n, m);
-    gsl_matrix *Tt_original = gsl_matrix_alloc(n, p);
+    gsl_matrix *Y = gsl_matrix_alloc(n, m);
+    gsl_matrix *Tt_orig = gsl_matrix_alloc(n, p);
+    gsl_matrix *beta = gsl_matrix_alloc(p, m);
 
-    /* Compute projection matrix and observed beta */
-    compute_projection_matrix(&Xt.matrix, lambda, I, T);
-    gsl_matrix_transpose_memcpy(Yr, &Yt.matrix);
-    gsl_matrix_view beta_view = gsl_matrix_view_array(bv, p, m);
-    gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, Yr, 0.0, &beta_view.matrix);
+    /* Compute I = (X^T X + lambda*I)^{-1} */
+    gsl_matrix_set_identity(I);
+    gsl_blas_dsyrk(CblasLower, CblasNoTrans, 1.0, &Xt.matrix, lambda, I);
+    gsl_linalg_cholesky_decomp(I);
+    gsl_linalg_cholesky_invert(I);
 
-    /* Prepare T transpose */
-    gsl_matrix_transpose_memcpy(Tt_original, T);
+    /* T = I * Xt */
+    gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, I, &Xt.matrix, 0.0, T);
+
+    /* Get Y and compute beta */
+    gsl_matrix_transpose_memcpy(Y, &Yt.matrix);
+    gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, Y, 0.0, beta);
+    memcpy(bv, beta->data, len * sizeof(double));
+
+    /* Prepare T transpose for permutation */
+    gsl_matrix_transpose_memcpy(Tt_orig, T);
 
     /* Prepare permutation table */
-    int *perm_table = generate_permutation_table((int)n, nrand, 0);
+    int *perm_table = generate_permutation_table(n, nrand, 0);
 
     /* Determine actual thread count */
     int actual_threads = 1;
@@ -744,8 +871,8 @@ SEXP ridgeRegTperm_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp,
     #endif
 
     /* Allocate thread-local accumulators */
-    double *thread_sums = (double*)calloc((size_t)actual_threads * len, sizeof(double));
-    double *thread_sumsq = (double*)calloc((size_t)actual_threads * len, sizeof(double));
+    double *thread_aver = (double*)calloc((size_t)actual_threads * len, sizeof(double));
+    double *thread_aver_sq = (double*)calloc((size_t)actual_threads * len, sizeof(double));
     double *thread_counts = (double*)calloc((size_t)actual_threads * len, sizeof(double));
 
     /* Parallel permutation loop */
@@ -756,63 +883,69 @@ SEXP ridgeRegTperm_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp,
             tid = omp_get_thread_num();
         #endif
 
-        /* Thread-local accumulator pointers */
-        double *my_sums = &thread_sums[(size_t)tid * len];
-        double *my_sumsq = &thread_sumsq[(size_t)tid * len];
+        double *my_aver = &thread_aver[(size_t)tid * len];
+        double *my_aver_sq = &thread_aver_sq[(size_t)tid * len];
         double *my_counts = &thread_counts[(size_t)tid * len];
 
         /* Thread-local working matrices */
-        gsl_matrix *Tt_permuted = gsl_matrix_alloc(n, p);
-        gsl_matrix *br = gsl_matrix_alloc(p, m);
+        gsl_matrix *Tt_perm = gsl_matrix_alloc(n, p);
+        gsl_matrix *beta_rand = gsl_matrix_alloc(p, m);
 
         #pragma omp for schedule(dynamic, 16)
-        for (int perm = 0; perm < nrand; perm++) {
-            int *perm_indices = perm_table + ((size_t)perm * n);
+        for (int i = 0; i < nrand; i++) {
+            int *perm_idx = perm_table + ((size_t)i * n);
 
             /* Scatter permutation */
-            for (size_t i = 0; i < n; i++) {
-                memcpy(Tt_permuted->data + ((size_t)perm_indices[i] * p),
-                       Tt_original->data + (i * p),
+            for (int j = 0; j < n; j++) {
+                memcpy(Tt_perm->data + ((size_t)perm_idx[j] * p),
+                       Tt_orig->data + ((size_t)j * p),
                        p * sizeof(double));
             }
 
-            /* Compute permuted coefficients */
-            gsl_blas_dgemm(CblasTrans, CblasNoTrans, 1.0, Tt_permuted, Yr, 0.0, br);
+            /* Compute permuted beta */
+            gsl_blas_dgemm(CblasTrans, CblasNoTrans, 1.0, Tt_perm, Y, 0.0, beta_rand);
 
             /* Accumulate statistics */
             for (R_xlen_t k = 0; k < len; k++) {
-                if (fabs(br->data[k]) >= fabs(bv[k])) my_counts[k]++;
-                my_sums[k] += br->data[k];
-                my_sumsq[k] += br->data[k] * br->data[k];
+                if (fabs(beta_rand->data[k]) >= fabs(beta->data[k])) my_counts[k]++;
+                my_aver[k] += beta_rand->data[k];
+                my_aver_sq[k] += beta_rand->data[k] * beta_rand->data[k];
             }
         }
 
-        gsl_matrix_free(Tt_permuted);
-        gsl_matrix_free(br);
+        gsl_matrix_free(Tt_perm);
+        gsl_matrix_free(beta_rand);
     }
 
     /* Reduce thread-local results */
     for (int t = 0; t < actual_threads; t++) {
         size_t offset = (size_t)t * len;
-        for (R_xlen_t i = 0; i < len; i++) {
-            zv[i] += thread_sums[offset + i];
-            sv[i] += thread_sumsq[offset + i];
-            pv[i] += thread_counts[offset + i];
+        for (R_xlen_t k = 0; k < len; k++) {
+            sv[k] += thread_aver[offset + k];
+            zv[k] += thread_aver_sq[offset + k];
+            pv[k] += thread_counts[offset + k];
         }
     }
 
     /* Finalize statistics */
-    finalize_permutation_stats(bv, sv, zv, pv, len, nrand);
+    for (R_xlen_t k = 0; k < len; k++) {
+        double mean = sv[k] / nrand;
+        double var = (zv[k] / nrand) - mean * mean;
+        pv[k] = (pv[k] + 1.0) / (nrand + 1.0);
+        zv[k] = (sqrt(var) > 1e-12) ? (bv[k] - mean) / sqrt(var) : 0.0;
+        sv[k] = sqrt(var);
+    }
 
     /* Cleanup */
-    free(thread_sums);
-    free(thread_sumsq);
+    free(thread_aver);
+    free(thread_aver_sq);
     free(thread_counts);
     free(perm_table);
-    gsl_matrix_free(Tt_original);
+    gsl_matrix_free(Tt_orig);
     gsl_matrix_free(I);
     gsl_matrix_free(T);
-    gsl_matrix_free(Yr);
+    gsl_matrix_free(Y);
+    gsl_matrix_free(beta);
 
     SEXP result = create_result_list(beta_sexp, se_sexp, zscore_sexp, pvalue_sexp);
     UNPROTECT(4);
