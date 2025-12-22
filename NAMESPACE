@@ -2,7 +2,6 @@
 
 export(SecAct.compare.activity)
 export(SecAct.activity.inference)
-
 export(SecAct.compare.methods)
 export(SecAct.inference.gsl.new2)
 export(SecAct.inference.gsl.new)
