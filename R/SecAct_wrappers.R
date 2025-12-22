@@ -5,11 +5,12 @@
 #' This module provides R wrappers for ridge regression-based activity inference.
 #' Multiple implementations are available with different performance characteristics:
 #'
-#'   - Legacy:  Original .C interface (single-threaded)
-#'   - Old:     .Call interface with Y-permutation (single-threaded)
-#'   - Old2:    .Call interface with T-permutation (single-threaded, cache-friendly)
-#'   - New:     .Call interface with Y-permutation (multi-threaded, OpenMP)
-#'   - New2:    .Call interface with T-permutation (multi-threaded, OpenMP)
+#'   - legacy: Original .C interface (single-threaded, Y-permutation)
+#'   - styp:   .Call interface, Single-Thread Y-Permutation
+#'   - sttp:   .Call interface, Single-Thread T-Permutation (cache-friendly)
+#'   - mtyp:   .Call interface, Multi-Thread Y-Permutation (OpenMP)
+#'   - mttp:   .Call interface, Multi-Thread T-Permutation (OpenMP, cache-friendly)
+#'   - r:      Pure R implementation (no GSL required)
 #'
 #' @name RidgeR-package
 #' @docType package
@@ -268,7 +269,7 @@ SecAct.inference.gsl.legacy <- function(Y,
 #' @return Named list with beta, se, zscore, pvalue matrices (proteins x samples)
 #'
 #' @export
-SecAct.inference.gsl.old <- function(Y,
+SecAct.inference.gsl.styp <- function(Y,
                                       SigMat = "SecAct",
                                       lambda = 5e+05,
                                       nrand = 1000) {
@@ -307,7 +308,7 @@ SecAct.inference.gsl.old <- function(Y,
 #' @return Named list with beta, se, zscore, pvalue matrices (proteins x samples)
 #'
 #' @export
-SecAct.inference.gsl.old2 <- function(Y,
+SecAct.inference.gsl.sttp <- function(Y,
                                        SigMat = "SecAct",
                                        lambda = 5e+05,
                                        nrand = 1000) {
@@ -351,7 +352,7 @@ SecAct.inference.gsl.old2 <- function(Y,
 #' @return Named list with beta, se, zscore, pvalue matrices (proteins x samples)
 #'
 #' @export
-SecAct.inference.gsl.new <- function(Y,
+SecAct.inference.gsl.mtyp <- function(Y,
                                       SigMat = "SecAct",
                                       lambda = 5e+05,
                                       nrand = 1000,
@@ -387,12 +388,12 @@ SecAct.inference.gsl.new <- function(Y,
 #' Fast multi-threaded implementation using OpenMP parallelization
 #' with cache-friendly T column permutation (scatter approach).
 #'
-#' @inheritParams SecAct.inference.gsl.new
+#' @inheritParams SecAct.inference.gsl.mtyp
 #'
 #' @return Named list with beta, se, zscore, pvalue matrices (proteins x samples)
 #'
 #' @export
-SecAct.inference.gsl.new2 <- function(Y,
+SecAct.inference.gsl.mttp <- function(Y,
                                        SigMat = "SecAct",
                                        lambda = 5e+05,
                                        nrand = 1000,
@@ -586,7 +587,8 @@ SecAct.inference.r <- function(Y,
 #' @param nrand Number of permutations (default: 1000)
 #' @param sigFilter Logical; if TRUE, filter signatures by available genes
 #' @param ncores Number of CPU cores for parallel versions (default: auto)
-#' @param method Which implementation to use: "legacy", "old", "old2", "new", "new2"
+#' @param method Which implementation to use: "legacy", "styp", "sttp", "mtyp", "mttp", "r".
+#'   The "r" method uses pure R (no GSL required).
 #'
 #' @return Named list with beta, se, zscore, pvalue matrices (proteins x samples)
 #'
@@ -604,7 +606,7 @@ SecAct.activity.inference <- function(
     nrand = 1000,
     sigFilter = FALSE,
     ncores = NULL,
-    method = "new"
+    method = "mtyp"
 ) {
     # Compute differential expression if needed
     if (is.differential) {
@@ -695,7 +697,7 @@ SecAct.activity.inference <- function(
                                dimnames = list(colnames(X), colnames(Y)))
             )
         },
-        "old" = {
+        "styp" = {
             # .Call interface expects NON-transposed matrices
             raw <- .Call(
                 "ridgeReg_old_interface",
@@ -715,7 +717,7 @@ SecAct.activity.inference <- function(
                                dimnames = list(colnames(X), colnames(Y)))
             )
         },
-        "old2" = {
+        "sttp" = {
             # .Call interface expects NON-transposed matrices
             raw <- .Call(
                 "ridgeRegTperm_old_interface",
@@ -735,7 +737,7 @@ SecAct.activity.inference <- function(
                                dimnames = list(colnames(X), colnames(Y)))
             )
         },
-        "new" = {
+        "mtyp" = {
             # .Call interface expects NON-transposed matrices
             raw <- .Call(
                 "ridgeRegFast_interface",
@@ -756,7 +758,7 @@ SecAct.activity.inference <- function(
                                dimnames = list(colnames(X), colnames(Y)))
             )
         },
-        "new2" = {
+        "mttp" = {
             # .Call interface expects NON-transposed matrices
             raw <- .Call(
                 "ridgeRegTperm_interface",
@@ -777,7 +779,58 @@ SecAct.activity.inference <- function(
                                dimnames = list(colnames(X), colnames(Y)))
             )
         },
-        stop("Unknown method: ", method)
+        "r" = {
+            # Pure R implementation (no GSL required)
+            n <- nrow(Y)
+            p <- ncol(X)
+            m <- ncol(Y)
+            
+            # Compute ridge regression via Cholesky decomposition
+            A <- crossprod(X) + lambda * diag(p)
+            R <- chol(A)
+            beta <- backsolve(R, forwardsolve(t(R), crossprod(X, Y)))
+            
+            # Permutation testing
+            aver <- NULL
+            aver_sq <- NULL
+            pvalue_mat <- NULL
+            
+            for (i in seq_len(nrand)) {
+                set.seed(i)
+                beta_rand <- backsolve(R, forwardsolve(t(R), crossprod(X, Y[sample.int(n), , drop = FALSE])))
+                
+                if (i == 1) {
+                    aver <- beta_rand
+                    aver_sq <- beta_rand^2
+                    pvalue_mat <- (abs(beta_rand) >= abs(beta)) * 1.0
+                } else {
+                    aver <- aver + beta_rand
+                    aver_sq <- aver_sq + beta_rand^2
+                    pvalue_mat <- pvalue_mat + (abs(beta_rand) >= abs(beta))
+                }
+            }
+            
+            # Finalize statistics
+            aver <- aver / nrand
+            aver_sq <- aver_sq / nrand
+            se <- sqrt(aver_sq - aver * aver)
+            zscore <- (beta - aver) / se
+            zscore[!is.finite(zscore)] <- 0
+            pvalue_mat <- (pvalue_mat + 1) / (nrand + 1)
+            
+            # Set dimension names
+            rownames(beta) <- colnames(X)
+            colnames(beta) <- colnames(Y)
+            rownames(se) <- colnames(X)
+            colnames(se) <- colnames(Y)
+            rownames(zscore) <- colnames(X)
+            colnames(zscore) <- colnames(Y)
+            rownames(pvalue_mat) <- colnames(X)
+            colnames(pvalue_mat) <- colnames(Y)
+            
+            list(beta = beta, se = se, zscore = zscore, pvalue = pvalue_mat)
+        },
+        stop("Unknown method: ", method, ". Valid methods: legacy, old, old2, new, new2, r")
     )
     
     # Expand grouped signatures back to individual rows
@@ -804,16 +857,16 @@ SecAct.activity.inference <- function(
 #' Utility function to verify that all implementations produce identical
 #' (within tolerance) results and to compare their execution times.
 #'
-#' @inheritParams SecAct.inference.gsl.new
+#' @inheritParams SecAct.inference.gsl.mtyp
 #' @param tol Tolerance for numerical comparison (default: 1e-10)
 #'
 #' @return Invisibly returns a named list containing results from all methods:
 #'   \itemize{
 #'     \item \code{legacy}: Results from .C legacy implementation
-#'     \item \code{old}: Results from single-threaded Y-permutation
-#'     \item \code{old2}: Results from single-threaded T-permutation
-#'     \item \code{new}: Results from multi-threaded Y-permutation
-#'     \item \code{new2}: Results from multi-threaded T-permutation
+#'     \item \code{styp}: Results from single-threaded Y-permutation
+#'     \item \code{sttp}: Results from single-threaded T-permutation
+#'     \item \code{mtyp}: Results from multi-threaded Y-permutation
+#'     \item \code{mttp}: Results from multi-threaded T-permutation
 #'   }
 #'
 #' @examples
@@ -847,24 +900,29 @@ SecAct.compare.methods <- function(Y,
         res_legacy <- SecAct.inference.gsl.legacy(Y, SigMat, lambda, nrand)
     })
 
-    cat("Running gsl.old (single-threaded, Y-permutation)...\n")
-    t_old <- time_it({
-        res_old <- SecAct.inference.gsl.old(Y, SigMat, lambda, nrand)
+    cat("Running gsl.styp (single-threaded, Y-permutation)...\n")
+    t_styp <- time_it({
+        res_styp <- SecAct.inference.gsl.styp(Y, SigMat, lambda, nrand)
     })
 
-    cat("Running gsl.old2 (single-threaded, T-permutation)...\n")
-    t_old2 <- time_it({
-        res_old2 <- SecAct.inference.gsl.old2(Y, SigMat, lambda, nrand)
+    cat("Running gsl.sttp (single-threaded, T-permutation)...\n")
+    t_sttp <- time_it({
+        res_sttp <- SecAct.inference.gsl.sttp(Y, SigMat, lambda, nrand)
     })
 
-    cat("Running gsl.new (multi-threaded, Y-permutation)...\n")
-    t_new <- time_it({
-        res_new <- SecAct.inference.gsl.new(Y, SigMat, lambda, nrand, ncores)
+    cat("Running gsl.mtyp (multi-threaded, Y-permutation)...\n")
+    t_mtyp <- time_it({
+        res_mtyp <- SecAct.inference.gsl.mtyp(Y, SigMat, lambda, nrand, ncores)
     })
 
-    cat("Running gsl.new2 (multi-threaded, T-permutation)...\n")
-    t_new2 <- time_it({
-        res_new2 <- SecAct.inference.gsl.new2(Y, SigMat, lambda, nrand, ncores)
+    cat("Running gsl.mttp (multi-threaded, T-permutation)...\n")
+    t_mttp <- time_it({
+        res_mttp <- SecAct.inference.gsl.mttp(Y, SigMat, lambda, nrand, ncores)
+    })
+
+    cat("Running pure R implementation...\n")
+    t_r <- time_it({
+        res_r <- SecAct.inference.r(Y, SigMat, lambda, nrand)
     })
 
     # Helper to check equality within tolerance
@@ -876,31 +934,33 @@ SecAct.compare.methods <- function(Y,
     # Report consistency
     cat("\n")
     cat("=== Consistency Check (z-score comparison) ===\n")
-    cat(sprintf("  legacy vs old  : %s\n",
-                ifelse(check_equal(res_legacy$zscore, res_old$zscore), "PASS", "FAIL")))
-    cat(sprintf("  old    vs new  : %s\n",
-                ifelse(check_equal(res_old$zscore, res_new$zscore), "PASS", "FAIL")))
-    cat(sprintf("  old2   vs new2 : %s\n",
-                ifelse(check_equal(res_old2$zscore, res_new2$zscore), "PASS", "FAIL")))
-    cat(sprintf("  new    vs new2 : %s\n",
-                ifelse(check_equal(res_new$zscore, res_new2$zscore), "PASS", "FAIL")))
+    cat(sprintf("  legacy vs styp : %s\n",
+                ifelse(check_equal(res_legacy$zscore, res_styp$zscore), "PASS", "FAIL")))
+    cat(sprintf("  styp   vs mtyp : %s\n",
+                ifelse(check_equal(res_styp$zscore, res_mtyp$zscore), "PASS", "FAIL")))
+    cat(sprintf("  sttp   vs mttp : %s\n",
+                ifelse(check_equal(res_sttp$zscore, res_mttp$zscore), "PASS", "FAIL")))
+    cat(sprintf("  mtyp   vs mttp : %s\n",
+                ifelse(check_equal(res_mtyp$zscore, res_mttp$zscore), "PASS", "FAIL")))
 
     # Report timing
     cat("\n")
     cat("=== Timing Summary ===\n")
     cat(sprintf("  gsl.legacy : %6.2f seconds\n", t_legacy))
-    cat(sprintf("  gsl.old    : %6.2f seconds\n", t_old))
-    cat(sprintf("  gsl.old2   : %6.2f seconds\n", t_old2))
-    cat(sprintf("  gsl.new    : %6.2f seconds\n", t_new))
-    cat(sprintf("  gsl.new2   : %6.2f seconds\n", t_new2))
+    cat(sprintf("  gsl.styp   : %6.2f seconds\n", t_styp))
+    cat(sprintf("  gsl.sttp   : %6.2f seconds\n", t_sttp))
+    cat(sprintf("  gsl.mtyp   : %6.2f seconds\n", t_mtyp))
+    cat(sprintf("  gsl.mttp   : %6.2f seconds\n", t_mttp))
+    cat(sprintf("  pure R     : %6.2f seconds\n", t_r))
 
     # Return all results invisibly
     invisible(list(
         legacy = res_legacy,
-        old    = res_old,
-        old2   = res_old2,
-        new    = res_new,
-        new2   = res_new2
+        styp   = res_styp,
+        sttp   = res_sttp,
+        mtyp   = res_mtyp,
+        mttp   = res_mttp,
+        r      = res_r
     ))
 }
 
@@ -957,43 +1017,53 @@ SecAct.compare.activity <- function(
         )
     })
     
-    cat("Method: old (single-threaded, Y-permutation)...\n")
-    t_old <- time_it({
-        res_old <- SecAct.activity.inference(
+    cat("Method: styp (single-threaded, Y-permutation)...\n")
+    t_styp <- time_it({
+        res_styp <- SecAct.activity.inference(
             inputProfile, is.differential = is.differential,
             sigMatrix = sigMatrix, is.group.sig = is.group.sig,
             is.group.cor = is.group.cor, lambda = lambda,
-            nrand = nrand, method = "old"
+            nrand = nrand, method = "styp"
         )
     })
     
-    cat("Method: old2 (single-threaded, T-permutation)...\n")
-    t_old2 <- time_it({
-        res_old2 <- SecAct.activity.inference(
+    cat("Method: sttp (single-threaded, T-permutation)...\n")
+    t_sttp <- time_it({
+        res_sttp <- SecAct.activity.inference(
             inputProfile, is.differential = is.differential,
             sigMatrix = sigMatrix, is.group.sig = is.group.sig,
             is.group.cor = is.group.cor, lambda = lambda,
-            nrand = nrand, method = "old2"
+            nrand = nrand, method = "sttp"
         )
     })
     
-    cat("Method: new (multi-threaded, Y-permutation)...\n")
-    t_new <- time_it({
-        res_new <- SecAct.activity.inference(
+    cat("Method: mtyp (multi-threaded, Y-permutation)...\n")
+    t_mtyp <- time_it({
+        res_mtyp <- SecAct.activity.inference(
             inputProfile, is.differential = is.differential,
             sigMatrix = sigMatrix, is.group.sig = is.group.sig,
             is.group.cor = is.group.cor, lambda = lambda,
-            nrand = nrand, ncores = ncores, method = "new"
+            nrand = nrand, ncores = ncores, method = "mtyp"
         )
     })
     
-    cat("Method: new2 (multi-threaded, T-permutation)...\n")
-    t_new2 <- time_it({
-        res_new2 <- SecAct.activity.inference(
+    cat("Method: mttp (multi-threaded, T-permutation)...\n")
+    t_mttp <- time_it({
+        res_mttp <- SecAct.activity.inference(
             inputProfile, is.differential = is.differential,
             sigMatrix = sigMatrix, is.group.sig = is.group.sig,
             is.group.cor = is.group.cor, lambda = lambda,
-            nrand = nrand, ncores = ncores, method = "new2"
+            nrand = nrand, ncores = ncores, method = "mttp"
+        )
+    })
+    
+    cat("Method: r (pure R, no GSL)...\n")
+    t_r <- time_it({
+        res_r <- SecAct.activity.inference(
+            inputProfile, is.differential = is.differential,
+            sigMatrix = sigMatrix, is.group.sig = is.group.sig,
+            is.group.cor = is.group.cor, lambda = lambda,
+            nrand = nrand, method = "r"
         )
     })
     
@@ -1001,8 +1071,10 @@ SecAct.compare.activity <- function(
     cat("\n=== Z-score Comparison (first 6 rows) ===\n")
     cat("\nLegacy:\n")
     print(head(res_legacy$zscore))
-    cat("\nNew:\n")
-    print(head(res_new$zscore))
+    cat("\nMTYP:\n")
+    print(head(res_mtyp$zscore))
+    cat("\nPure R:\n")
+    print(head(res_r$zscore))
     
     # Check consistency
     tol <- 1e-10
@@ -1011,28 +1083,30 @@ SecAct.compare.activity <- function(
     }
     
     cat("\n=== Consistency Check ===\n")
-    cat(sprintf("  legacy vs old  : %s\n",
-                ifelse(check_equal(res_legacy$zscore, res_old$zscore), "PASS", "FAIL")))
-    cat(sprintf("  old    vs new  : %s\n",
-                ifelse(check_equal(res_old$zscore, res_new$zscore), "PASS", "FAIL")))
-    cat(sprintf("  old2   vs new2 : %s\n",
-                ifelse(check_equal(res_old2$zscore, res_new2$zscore), "PASS", "FAIL")))
-    cat(sprintf("  new    vs new2 : %s\n",
-                ifelse(check_equal(res_new$zscore, res_new2$zscore), "PASS", "FAIL")))
+    cat(sprintf("  legacy vs styp : %s\n",
+                ifelse(check_equal(res_legacy$zscore, res_styp$zscore), "PASS", "FAIL")))
+    cat(sprintf("  styp   vs mtyp : %s\n",
+                ifelse(check_equal(res_styp$zscore, res_mtyp$zscore), "PASS", "FAIL")))
+    cat(sprintf("  sttp   vs mttp : %s\n",
+                ifelse(check_equal(res_sttp$zscore, res_mttp$zscore), "PASS", "FAIL")))
+    cat(sprintf("  mtyp   vs mttp : %s\n",
+                ifelse(check_equal(res_mtyp$zscore, res_mttp$zscore), "PASS", "FAIL")))
     
     cat("\n=== Timing Summary ===\n")
     cat(sprintf("  legacy : %6.2f seconds\n", t_legacy))
-    cat(sprintf("  old    : %6.2f seconds\n", t_old))
-    cat(sprintf("  old2   : %6.2f seconds\n", t_old2))
-    cat(sprintf("  new    : %6.2f seconds\n", t_new))
-    cat(sprintf("  new2   : %6.2f seconds\n", t_new2))
+    cat(sprintf("  styp   : %6.2f seconds\n", t_styp))
+    cat(sprintf("  sttp   : %6.2f seconds\n", t_sttp))
+    cat(sprintf("  mtyp   : %6.2f seconds\n", t_mtyp))
+    cat(sprintf("  mttp   : %6.2f seconds\n", t_mttp))
+    cat(sprintf("  r      : %6.2f seconds\n", t_r))
     
     invisible(list(
         legacy = res_legacy,
-        old    = res_old,
-        old2   = res_old2,
-        new    = res_new,
-        new2   = res_new2
+        styp   = res_styp,
+        sttp   = res_sttp,
+        mtyp   = res_mtyp,
+        mttp   = res_mttp,
+        r      = res_r
     ))
 }
 
@@ -1157,8 +1231,8 @@ SecAct.compare.activity <- function(
 #' @param sigFilter Logical indicating whether to filter signatures by available
 #'   genes (default: FALSE).
 #' @param ncores Number of CPU cores for parallel processing (default: auto).
-#' @param method Which implementation to use: "legacy", "old", "old2", "new", "new2"
-#'   (default: "new").
+#' @param method Which implementation to use: "legacy", "styp", "sttp", "mtyp", "mttp", "r"
+#'   (default: "mtyp"). The "r" method uses pure R (no GSL required).
 #' @param return.SpaCET If inputProfile is a SpaCET object, whether to return
 #'   the modified SpaCET object (TRUE) or just the results list (FALSE).
 #'   Default: TRUE.
@@ -1207,7 +1281,7 @@ SecAct.activity.inference.ST <- function(
     nrand = 1000,
     sigFilter = FALSE,
     ncores = NULL,
-    method = "new",
+    method = "mtyp",
     return.SpaCET = TRUE
 ) {
     # Check if input is a SpaCET object
@@ -1347,7 +1421,8 @@ SecAct.activity.inference.ST <- function(
 #' @param nrand Number of permutations.
 #' @param sigFilter Logical indicating whether to filter signatures.
 #' @param ncores Number of CPU cores for parallel processing.
-#' @param method Which implementation to use.
+#' @param method Which implementation to use: "legacy", "styp", "sttp", "mtyp", "mttp", "r"
+#'   (default: "mtyp"). The "r" method uses pure R (no GSL required).
 #' @param return.Seurat Whether to return the modified Seurat object (TRUE)
 #'   or just the results list (FALSE).
 #'
@@ -1367,7 +1442,7 @@ SecAct.activity.inference.scRNAseq <- function(
     nrand = 1000,
     sigFilter = FALSE,
     ncores = NULL,
-    method = "new",
+    method = "mtyp",
     return.Seurat = TRUE
 ) {
     # Check if input is a Seurat object
