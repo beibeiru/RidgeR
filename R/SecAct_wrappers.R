@@ -1,29 +1,3 @@
-# Internal helper for data preprocessing
-.get_sig_matrix <- function(SigMat, Y) {
-  if(SigMat == "SecAct") {
-    Xfile <- file.path(system.file(package = "SecAct"), "extdata/SecAct.tsv.gz")
-    X <- read.table(Xfile, sep="\t", check.names=FALSE)
-  } else {
-    X <- read.table(SigMat, sep="\t", check.names=FALSE)
-  }
-  olp <- intersect(row.names(Y), row.names(X))
-  X <- as.matrix(X[olp, , drop=FALSE])
-  Y_sub <- as.matrix(Y[olp, , drop=FALSE])
-  # Standardize
-  X <- scale(X); X[is.na(X)] <- 0
-  Y_sub <- scale(Y_sub); Y_sub[is.na(Y_sub)] <- 0
-  list(X=X, Y=Y_sub)
-}
-
-# Internal helper for formatting C output
-.format_res <- function(res, X, Y) {
-  p <- ncol(X); m <- ncol(Y)
-  lapply(res, function(v) {
-    matrix(v, byrow=TRUE, nrow=p, ncol=m, 
-           dimnames=list(colnames(X), colnames(Y)))
-  })
-}
-
 #' @title Secreted protein activity inference (Legacy Version)
 #' @description Old single-threaded implementation using Y row permutation.
 #' @param Y Gene expression matrix (genes x samples).
@@ -32,26 +6,92 @@
 #' @param nrand Number of randomizations (default: 1000).
 #' @return List with beta, se, zscore, pvalue matrices (proteins x samples).
 #' @export
-SecAct.inference.gsl.old <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=1000) {
-  data <- .get_sig_matrix(SigMat, Y)
-  res <- .Call("ridgeReg_old_interface", data$X, data$Y, as.numeric(lambda), as.integer(nrand))
-  .format_res(res, data$X, data$Y)
+SecAct.inference.gsl.old <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=1000)
+{
+  if(SigMat=="SecAct") {
+    Xfile <- file.path(system.file(package = "SecAct"), "extdata/SecAct.tsv.gz")
+    X <- read.table(Xfile, sep="\t", check.names=FALSE)
+  } else {
+    X <- read.table(SigMat, sep="\t", check.names=FALSE)
+  }
+  
+  olp <- intersect(row.names(Y), row.names(X))
+  X <- as.matrix(X[olp, , drop=FALSE])
+  Y <- as.matrix(Y[olp, , drop=FALSE])
+  
+  # Standardize
+  X <- scale(X); Y <- scale(Y)
+  X[is.na(X)] <- 0; Y[is.na(Y)] <- 0
+  
+  p <- ncol(X)
+  m <- ncol(Y)
+  
+  res <- .Call("ridgeReg_old_interface", 
+               X, Y, 
+               as.numeric(lambda), 
+               as.integer(nrand))
+  
+  # Note: C code outputs row-major, use byrow=TRUE
+  formatter <- function(v) {
+    matrix(v, byrow=TRUE, nrow=p, ncol=m, 
+           dimnames=list(colnames(X), colnames(Y)))
+  }
+  
+  list(
+    beta = formatter(res$beta), 
+    se = formatter(res$se), 
+    zscore = formatter(res$zscore), 
+    pvalue = formatter(res$pvalue)
+  )
 }
+
 
 #' @title Secreted protein activity inference (Legacy Version - T Permutation)
 #' @description Single-threaded implementation using cache-friendly T column permutation.
-#'              Same algorithm as gsl.new2 but without OpenMP parallelization.
 #' @param Y Gene expression matrix (genes x samples).
 #' @param SigMat Secreted protein signature matrix or "SecAct" for default.
 #' @param lambda Penalty factor (default: 5e+05).
 #' @param nrand Number of randomizations (default: 1000).
 #' @return List with beta, se, zscore, pvalue matrices (proteins x samples).
 #' @export
-SecAct.inference.gsl.old2 <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=1000) {
-  data <- .get_sig_matrix(SigMat, Y)
-  res <- .Call("ridgeRegTperm_old_interface", data$X, data$Y, as.numeric(lambda), as.integer(nrand))
-  .format_res(res, data$X, data$Y)
+SecAct.inference.gsl.old2 <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=1000)
+{
+  if(SigMat=="SecAct") {
+    Xfile <- file.path(system.file(package = "SecAct"), "extdata/SecAct.tsv.gz")
+    X <- read.table(Xfile, sep="\t", check.names=FALSE)
+  } else {
+    X <- read.table(SigMat, sep="\t", check.names=FALSE)
+  }
+  
+  olp <- intersect(row.names(Y), row.names(X))
+  X <- as.matrix(X[olp, , drop=FALSE])
+  Y <- as.matrix(Y[olp, , drop=FALSE])
+  
+  # Standardize
+  X <- scale(X); Y <- scale(Y)
+  X[is.na(X)] <- 0; Y[is.na(Y)] <- 0
+  
+  p <- ncol(X)
+  m <- ncol(Y)
+  
+  res <- .Call("ridgeRegTperm_old_interface", 
+               X, Y, 
+               as.numeric(lambda), 
+               as.integer(nrand))
+  
+  formatter <- function(v) {
+    matrix(v, byrow=TRUE, nrow=p, ncol=m, 
+           dimnames=list(colnames(X), colnames(Y)))
+  }
+  
+  list(
+    beta = formatter(res$beta), 
+    se = formatter(res$se), 
+    zscore = formatter(res$zscore), 
+    pvalue = formatter(res$pvalue)
+  )
 }
+
 
 #' @title Secreted protein activity inference (Optimized Version - Y Permutation)
 #' @description Fast multi-threaded implementation using OpenMP and .Call interface.
@@ -63,16 +103,52 @@ SecAct.inference.gsl.old2 <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=10
 #' @param ncores Number of cores (default: all available minus 1).
 #' @return List with beta, se, zscore, pvalue matrices (proteins x samples).
 #' @export
-SecAct.inference.gsl.new <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=1000, ncores=NULL) {
-  data <- .get_sig_matrix(SigMat, Y)
-  if(is.null(ncores)) ncores <- max(1, parallel::detectCores(logical = FALSE) - 1)
-  res <- .Call("ridgeRegFast_interface", data$X, data$Y, as.numeric(lambda), as.integer(nrand), as.integer(ncores))
-  .format_res(res, data$X, data$Y)
+SecAct.inference.gsl.new <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=1000, ncores=NULL)
+{
+  if(SigMat=="SecAct") {
+    Xfile <- file.path(system.file(package = "SecAct"), "extdata/SecAct.tsv.gz")
+    X <- read.table(Xfile, sep="\t", check.names=FALSE)
+  } else {
+    X <- read.table(SigMat, sep="\t", check.names=FALSE)
+  }
+  
+  olp <- intersect(row.names(Y), row.names(X))
+  X <- as.matrix(X[olp, , drop=FALSE])
+  Y <- as.matrix(Y[olp, , drop=FALSE])
+  
+  # Standardize
+  X <- scale(X); X[is.na(X)] <- 0
+  Y <- scale(Y); Y[is.na(Y)] <- 0
+  
+  if(is.null(ncores)) {
+    ncores <- max(1, parallel::detectCores(logical = FALSE) - 1)
+  }
+  
+  p <- ncol(X)
+  m <- ncol(Y)
+  
+  res <- .Call("ridgeRegFast_interface",
+               X, Y,
+               as.numeric(lambda),
+               as.integer(nrand),
+               as.integer(ncores))
+  
+  formatter <- function(v) {
+    matrix(v, byrow=TRUE, nrow=p, ncol=m,
+           dimnames=list(colnames(X), colnames(Y)))
+  }
+  
+  list(
+    beta = formatter(res$beta), 
+    se = formatter(res$se), 
+    zscore = formatter(res$zscore), 
+    pvalue = formatter(res$pvalue)
+  )
 }
+
 
 #' @title Secreted protein activity inference (T Column Permutation Version)
 #' @description Fast multi-threaded implementation using T column permutation.
-#'              Optimized for LARGE Y matrices (millions of samples).
 #' @param Y Gene expression matrix (genes x samples).
 #' @param SigMat Secreted protein signature matrix or "SecAct" for default.
 #' @param lambda Penalty factor (default: 5e+05).
@@ -80,11 +156,47 @@ SecAct.inference.gsl.new <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=100
 #' @param ncores Number of cores (default: all available minus 1).
 #' @return List with beta, se, zscore, pvalue matrices (proteins x samples).
 #' @export
-SecAct.inference.gsl.new2 <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=1000, ncores=NULL) {
-  data <- .get_sig_matrix(SigMat, Y)
-  if(is.null(ncores)) ncores <- max(1, parallel::detectCores(logical = FALSE) - 1)
-  res <- .Call("ridgeRegTperm_interface", data$X, data$Y, as.numeric(lambda), as.integer(nrand), as.integer(ncores))
-  .format_res(res, data$X, data$Y)
+SecAct.inference.gsl.new2 <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=1000, ncores=NULL)
+{
+  if(SigMat=="SecAct") {
+    Xfile <- file.path(system.file(package = "SecAct"), "extdata/SecAct.tsv.gz")
+    X <- read.table(Xfile, sep="\t", check.names=FALSE)
+  } else {
+    X <- read.table(SigMat, sep="\t", check.names=FALSE)
+  }
+  
+  olp <- intersect(row.names(Y), row.names(X))
+  X <- as.matrix(X[olp, , drop=FALSE])
+  Y <- as.matrix(Y[olp, , drop=FALSE])
+  
+  # Standardize
+  X <- scale(X); X[is.na(X)] <- 0
+  Y <- scale(Y); Y[is.na(Y)] <- 0
+  
+  if(is.null(ncores)) {
+    ncores <- max(1, parallel::detectCores(logical = FALSE) - 1)
+  }
+  
+  p <- ncol(X)
+  m <- ncol(Y)
+  
+  res <- .Call("ridgeRegTperm_interface",
+               X, Y,
+               as.numeric(lambda),
+               as.integer(nrand),
+               as.integer(ncores))
+  
+  formatter <- function(v) {
+    matrix(v, byrow=TRUE, nrow=p, ncol=m,
+           dimnames=list(colnames(X), colnames(Y)))
+  }
+  
+  list(
+    beta = formatter(res$beta), 
+    se = formatter(res$se), 
+    zscore = formatter(res$zscore), 
+    pvalue = formatter(res$pvalue)
+  )
 }
 
 #' @title Compare all four implementations
