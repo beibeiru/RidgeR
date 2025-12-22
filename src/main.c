@@ -18,6 +18,7 @@
    CORE HELPERS
    ========================================================= */
 
+// Fisher-Yates Shuffle
 void shuffle(int array[], const int n) {
     int i, j, t;
     for (i = 0; i < n - 1; i++) {
