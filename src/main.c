@@ -20,27 +20,6 @@
    HELPER FUNCTIONS
    ========================================================= */
 
-gsl_matrix *RVectorObject_to_gsl_matrix(double *vec, size_t nr, size_t nc)
-{
-  gsl_block *b = (gsl_block*)malloc(sizeof(gsl_block));
-  gsl_matrix *r = (gsl_matrix*)malloc(sizeof(gsl_matrix));
-  r->size1 = nr;
-  r->tda = r->size2 = nc;
-  r->owner = 1; 
-  b->data = r->data = vec;
-  r->block = b;
-  b->size = r->size1 * r->size2;
-  return r;
-}
-
-void gsl_matrix_partial_free(gsl_matrix *x)
-{
-  if(x) {
-    if(x->block) free(x->block);
-    free(x);
-  }
-}
-
 void shuffle(int array[], const int n)
 {
   int i, j, t;
@@ -61,9 +40,10 @@ void ridgeReg_old_core(
   double *beta_vec, double *se_vec, double *zscore_vec, double *pvalue_vec
 )
 {
-  gsl_matrix *Xt = RVectorObject_to_gsl_matrix(X_ptr, p, n);
-  gsl_matrix *Yt = RVectorObject_to_gsl_matrix(Y_ptr, m, n);
-  gsl_matrix *beta = RVectorObject_to_gsl_matrix(beta_vec, p, m);
+  // SAFE WRAPPING: Use views instead of manual malloc
+  gsl_matrix_view Xt = gsl_matrix_view_array(X_ptr, p, n);
+  gsl_matrix_view Yt = gsl_matrix_view_array(Y_ptr, m, n);
+  gsl_matrix_view beta_obs = gsl_matrix_view_array(beta_vec, p, m);
 
   gsl_matrix *I = gsl_matrix_alloc(p, p);
   gsl_matrix *T = gsl_matrix_alloc(p, n);
@@ -74,11 +54,11 @@ void ridgeReg_old_core(
   double *sum_sq = (double*)calloc(p * m, sizeof(double));
 
   gsl_matrix_set_identity(I);
-  gsl_blas_dsyrk(CblasLower, CblasNoTrans, 1.0, Xt, lambda, I);
+  gsl_blas_dsyrk(CblasLower, CblasNoTrans, 1.0, &Xt.matrix, lambda, I);
   gsl_linalg_cholesky_decomp(I);
   gsl_linalg_cholesky_invert(I);
-  gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, I, Xt, 0.0, T);
-  gsl_blas_dgemm(CblasNoTrans, CblasTrans, 1.0, T, Yt, 0.0, beta);
+  gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, I, &Xt.matrix, 0.0, T);
+  gsl_blas_dgemm(CblasNoTrans, CblasTrans, 1.0, T, &Yt.matrix, 0.0, &beta_obs.matrix);
 
   int *array_index = (int*)malloc(n * sizeof(int));
   for(size_t i=0; i<n; i++) array_index[i] = (int)i;
@@ -88,8 +68,7 @@ void ridgeReg_old_core(
   {
     shuffle(array_index, (int)n);
     for(size_t j=0; j<n; j++){
-      gsl_vector_const_view t_col = gsl_matrix_const_column(Yt, (size_t)array_index[j]);
-      // FIXED: Use gsl_matrix_set_col instead of gsl_matrix_set_column
+      gsl_vector_const_view t_col = gsl_matrix_const_column(&Yt.matrix, (size_t)array_index[j]);
       gsl_matrix_set_col(Y_rand_t, j, &t_col.vector);
     }
     gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, Y_rand_t, 0.0, beta_rand);
@@ -106,15 +85,14 @@ void ridgeReg_old_core(
   for(size_t i=0; i < p*m; i++) {
     pvalue_vec[i] = (pvalue_vec[i] + 1.0) / (nrand + 1.0);
     double mean = sum[i] * inv_nr;
-    double var = (sum_sq[i] * inv_nr) - (mean * mean);
-    double sd = sqrt(var > 0 ? var : 0);
+    double var = fmax(0, (sum_sq[i] * inv_nr) - (mean * mean));
+    double sd = sqrt(var);
     se_vec[i] = sd;
     zscore_vec[i] = (sd > 1e-12) ? (beta_vec[i] - mean) / sd : 0.0;
   }
 
   gsl_matrix_free(I); gsl_matrix_free(T); gsl_matrix_free(Y_rand_t);
   gsl_matrix_free(beta_rand); free(array_index); free(sum); free(sum_sq);
-  gsl_matrix_partial_free(Xt); gsl_matrix_partial_free(Yt); gsl_matrix_partial_free(beta);
 }
 
 /* =========================================================
@@ -126,18 +104,18 @@ void ridgeRegTperm_old_core(
   double *beta_vec, double *se_vec, double *zscore_vec, double *pvalue_vec
 )
 {
-  gsl_matrix *Xt = RVectorObject_to_gsl_matrix(X_ptr, p, n);
-  gsl_matrix *Yt = RVectorObject_to_gsl_matrix(Y_ptr, m, n);
-  gsl_matrix *beta = RVectorObject_to_gsl_matrix(beta_vec, p, m);
+  gsl_matrix_view Xt = gsl_matrix_view_array(X_ptr, p, n);
+  gsl_matrix_view Yt = gsl_matrix_view_array(Y_ptr, m, n);
+  gsl_matrix_view beta_obs = gsl_matrix_view_array(beta_vec, p, m);
 
   gsl_matrix *I = gsl_matrix_alloc(p, p);
   gsl_matrix *T = gsl_matrix_alloc(p, n);
   gsl_matrix_set_identity(I);
-  gsl_blas_dsyrk(CblasLower, CblasNoTrans, 1.0, Xt, lambda, I);
+  gsl_blas_dsyrk(CblasLower, CblasNoTrans, 1.0, &Xt.matrix, lambda, I);
   gsl_linalg_cholesky_decomp(I);
   gsl_linalg_cholesky_invert(I);
-  gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, I, Xt, 0.0, T);
-  gsl_blas_dgemm(CblasNoTrans, CblasTrans, 1.0, T, Yt, 0.0, beta);
+  gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, I, &Xt.matrix, 0.0, T);
+  gsl_blas_dgemm(CblasNoTrans, CblasTrans, 1.0, T, &Yt.matrix, 0.0, &beta_obs.matrix);
 
   gsl_matrix *Tt_orig = gsl_matrix_alloc(n, p);
   gsl_matrix_transpose_memcpy(Tt_orig, T);
@@ -156,7 +134,7 @@ void ridgeRegTperm_old_core(
     for(size_t i=0; i<n; i++) {
        memcpy(Tt_perm->data + ((size_t)temp_idx[i] * p), Tt_orig->data + (i * p), p * sizeof(double));
     }
-    gsl_blas_dgemm(CblasTrans, CblasTrans, 1.0, Tt_perm, Yt, 0.0, beta_rand);
+    gsl_blas_dgemm(CblasTrans, CblasTrans, 1.0, Tt_perm, &Yt.matrix, 0.0, beta_rand);
     for(size_t k=0; k < p*m; k++) {
       double br = beta_rand->data[k];
       if(fabs(br) >= fabs(beta_vec[k])) pvalue_vec[k]++;
@@ -176,7 +154,6 @@ void ridgeRegTperm_old_core(
   gsl_matrix_free(I); gsl_matrix_free(T); gsl_matrix_free(Tt_orig); 
   gsl_matrix_free(Tt_perm); gsl_matrix_free(beta_rand);
   free(temp_idx); free(sum); free(sum_sq);
-  gsl_matrix_partial_free(Xt); gsl_matrix_partial_free(Yt); gsl_matrix_partial_free(beta);
 }
 
 /* =========================================================
@@ -192,18 +169,18 @@ void ridgeRegFast_core(
     if (num_threads > 0) omp_set_num_threads(num_threads);
   #endif
 
-  gsl_matrix *Xt = RVectorObject_to_gsl_matrix(X_ptr, p, n);
-  gsl_matrix *Yt = RVectorObject_to_gsl_matrix(Y_ptr, m, n);
-  gsl_matrix *beta = RVectorObject_to_gsl_matrix(beta_vec, p, m);
+  gsl_matrix_view Xt = gsl_matrix_view_array(X_ptr, p, n);
+  gsl_matrix_view Yt = gsl_matrix_view_array(Y_ptr, m, n);
+  gsl_matrix_view beta_obs = gsl_matrix_view_array(beta_vec, p, m);
 
   gsl_matrix *I = gsl_matrix_alloc(p, p);
   gsl_matrix *T = gsl_matrix_alloc(p, n);
   gsl_matrix_set_identity(I);
-  gsl_blas_dsyrk(CblasLower, CblasNoTrans, 1.0, Xt, lambda, I);
+  gsl_blas_dsyrk(CblasLower, CblasNoTrans, 1.0, &Xt.matrix, lambda, I);
   gsl_linalg_cholesky_decomp(I);
   gsl_linalg_cholesky_invert(I);
-  gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, I, Xt, 0.0, T);
-  gsl_blas_dgemm(CblasNoTrans, CblasTrans, 1.0, T, Yt, 0.0, beta);
+  gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, I, &Xt.matrix, 0.0, T);
+  gsl_blas_dgemm(CblasNoTrans, CblasTrans, 1.0, T, &Yt.matrix, 0.0, &beta_obs.matrix);
 
   int *perm_table = (int*)malloc((size_t)nrand * n * sizeof(int));
   int *temp_idx = (int*)malloc(n * sizeof(int));
@@ -236,7 +213,7 @@ void ridgeRegFast_core(
         for(int ip = 0; ip < cur_p; ip++) {
           int *p_idx = &perm_table[(size_t)(b_start + ip) * n];
           for(size_t sl = 0; sl < cur_s; sl++) {
-            double *src_row = gsl_matrix_ptr(Yt, samp_start + sl, 0);
+            double *src_row = gsl_matrix_ptr(&Yt.matrix, samp_start + sl, 0);
             size_t dest_col = (ip * cur_s) + sl;
             for(size_t g = 0; g < n; g++) gsl_matrix_set(Y_block, g, dest_col, src_row[p_idx[g]]);
           }
@@ -270,7 +247,6 @@ void ridgeRegFast_core(
     zscore_vec[i] = (sd > 1e-12) ? (beta_vec[i] - mean) / sd : 0.0;
   }
   free(perm_table); gsl_matrix_free(I); gsl_matrix_free(T);
-  gsl_matrix_partial_free(Xt); gsl_matrix_partial_free(Yt); gsl_matrix_partial_free(beta);
 }
 
 /* =========================================================
@@ -286,18 +262,18 @@ void ridgeRegTperm_core(
     if (num_threads > 0) omp_set_num_threads(num_threads);
   #endif
 
-  gsl_matrix *Xt = RVectorObject_to_gsl_matrix(X_ptr, p, n);
-  gsl_matrix *Yt = RVectorObject_to_gsl_matrix(Y_ptr, m, n);
-  gsl_matrix *beta = RVectorObject_to_gsl_matrix(beta_vec, p, m);
+  gsl_matrix_view Xt = gsl_matrix_view_array(X_ptr, p, n);
+  gsl_matrix_view Yt = gsl_matrix_view_array(Y_ptr, m, n);
+  gsl_matrix_view beta_obs = gsl_matrix_view_array(beta_vec, p, m);
 
   gsl_matrix *I = gsl_matrix_alloc(p, p);
   gsl_matrix *T = gsl_matrix_alloc(p, n);
   gsl_matrix_set_identity(I);
-  gsl_blas_dsyrk(CblasLower, CblasNoTrans, 1.0, Xt, lambda, I);
+  gsl_blas_dsyrk(CblasLower, CblasNoTrans, 1.0, &Xt.matrix, lambda, I);
   gsl_linalg_cholesky_decomp(I);
   gsl_linalg_cholesky_invert(I);
-  gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, I, Xt, 0.0, T);
-  gsl_blas_dgemm(CblasNoTrans, CblasTrans, 1.0, T, Yt, 0.0, beta);
+  gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, I, &Xt.matrix, 0.0, T);
+  gsl_blas_dgemm(CblasNoTrans, CblasTrans, 1.0, T, &Yt.matrix, 0.0, &beta_obs.matrix);
 
   gsl_matrix *Tt_orig = gsl_matrix_alloc(n, p);
   gsl_matrix_transpose_memcpy(Tt_orig, T);
@@ -317,7 +293,6 @@ void ridgeRegTperm_core(
   #ifdef _OPENMP
     #pragma omp parallel
     { 
-       // FIXED: Multiline pragma to satisfy Clang expression parser
        #pragma omp single
        nths = omp_get_num_threads(); 
     }
@@ -341,7 +316,7 @@ void ridgeRegTperm_core(
     for(int ir = 0; ir < nrand; ir++) {
       int *p_idx = &perm_table[(size_t)ir * n];
       for(size_t i = 0; i < n; i++) memcpy(Tt_p->data + ((size_t)p_idx[i] * p), Tt_orig->data + (i * p), p * sizeof(double));
-      gsl_blas_dgemm(CblasTrans, CblasTrans, 1.0, Tt_p, Yt, 0.0, br);
+      gsl_blas_dgemm(CblasTrans, CblasTrans, 1.0, Tt_p, &Yt.matrix, 0.0, br);
       for(size_t k = 0; k < total_elements; k++) {
         double val = br->data[k];
         my_s[k] += val; my_ss[k] += val * val;
@@ -369,8 +344,7 @@ void ridgeRegTperm_core(
   }
 
   free(tsum); free(tsum_sq); free(tcount); free(perm_table); gsl_matrix_free(Tt_orig);
-  gsl_matrix_free(I); gsl_matrix_free(T); gsl_matrix_partial_free(Xt); 
-  gsl_matrix_partial_free(Yt); gsl_matrix_partial_free(beta);
+  gsl_matrix_free(I); gsl_matrix_free(T);
 }
 
 /* =========================================================
