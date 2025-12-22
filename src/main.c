@@ -49,13 +49,22 @@
 /**
  * Fisher-Yates shuffle using GSL RNG (in-place)
  *
+ * Matches the original algorithm's direction exactly:
+ *   for i = 0 to n-2: swap array[i] with array[j] where j in [i, n-1]
+ *
+ * This is critical for reproducibility - the reverse direction
+ * (i = n-1 down to 1) produces different permutation sequences
+ * even with identical random numbers.
+ *
  * @param rng    GSL random number generator
  * @param array  Integer array to shuffle
  * @param n      Length of array
  */
 static void shuffle_array(gsl_rng *rng, int *array, int n) {
-    for (int i = n - 1; i > 0; i--) {
-        int j = (int)gsl_rng_uniform_int(rng, (unsigned long)(i + 1));
+    for (int i = 0; i < n - 1; i++) {
+        /* j in range [i, n-1], matching original formula:
+         * j = i + rand() / (RAND_MAX / (n - i) + 1) */
+        int j = i + (int)gsl_rng_uniform_int(rng, (unsigned long)(n - i));
         int tmp = array[j];
         array[j] = array[i];
         array[i] = tmp;
