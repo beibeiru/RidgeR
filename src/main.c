@@ -22,6 +22,7 @@
 #include <Rinternals.h>
 #include <R_ext/Rdynload.h>
 
+#include <gsl/gsl_rng.h>
 #include <gsl/gsl_matrix.h>
 #include <gsl/gsl_blas.h>
 #include <gsl/gsl_linalg.h>
@@ -69,19 +70,27 @@ static int* generate_permutation_table(int n, int nrand) {
     size_t table_size = (size_t)nrand * (size_t)n;
     int *table = (int*)malloc(table_size * sizeof(int));
     int *base_indices = (int*)malloc((size_t)n * sizeof(int));
-
-    /* Initialize base index array */
+    
+    /* Use GSL's Mersenne Twister - identical across all platforms */
+    gsl_rng *rng = gsl_rng_alloc(gsl_rng_mt19937);
+    gsl_rng_set(rng, 0);  /* Fixed seed for reproducibility */
+    
     for (int i = 0; i < n; i++) {
         base_indices[i] = i;
     }
-
-    /* Generate permutations with fixed seed for reproducibility */
-    srand(0);
+    
     for (int perm = 0; perm < nrand; perm++) {
-        shuffle_array(base_indices, n);
+        /* Fisher-Yates shuffle using GSL's rng */
+        for (int i = n - 1; i > 0; i--) {
+            int j = gsl_rng_uniform_int(rng, i + 1);
+            int tmp = base_indices[j];
+            base_indices[j] = base_indices[i];
+            base_indices[i] = tmp;
+        }
         memcpy(table + ((size_t)perm * n), base_indices, n * sizeof(int));
     }
-
+    
+    gsl_rng_free(rng);
     free(base_indices);
     return table;
 }
