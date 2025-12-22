@@ -7,11 +7,11 @@
  * testing for secreted protein activity inference. Multiple implementations
  * are provided for different use cases:
  *
- *   Version 0 (Legacy):  .C interface, single-threaded, Y-permutation
- *   Version 1 (Old):     .Call interface, single-threaded, Y-permutation
- *   Version 2 (Old2):    .Call interface, single-threaded, T-permutation
- *   Version 3 (New):     .Call interface, multi-threaded (OpenMP), Y-permutation
- *   Version 4 (New2):    .Call interface, multi-threaded (OpenMP), T-permutation
+ *   legacy: .C interface, single-threaded, Y-permutation
+ *   styp:   .Call interface, Single-Thread Y-Permutation
+ *   sttp:   .Call interface, Single-Thread T-Permutation (cache-friendly)
+ *   mtyp:   .Call interface, Multi-Thread Y-Permutation (OpenMP)
+ *   mttp:   .Call interface, Multi-Thread T-Permutation (OpenMP, cache-friendly)
  *
  * Dependencies: GSL (GNU Scientific Library), OpenMP (optional)
  *
@@ -263,7 +263,7 @@ static void finalize_permutation_stats(const double *bv, double *sv, double *zv,
 
 
 /* =============================================================================
- * SECTION 4: VERSION 0 - LEGACY .C INTERFACE
+ * SECTION 4: LEGACY - .C INTERFACE (Y-PERMUTATION)
  * =============================================================================
  *
  * Original implementation using R's .C() interface.
@@ -379,14 +379,14 @@ void ridgeReg(double *X_vec, double *Y_vec,
 
 
 /* =============================================================================
- * SECTION 5: VERSION 1 - SINGLE-THREADED Y-PERMUTATION (.Call)
+ * SECTION 5: STYP - SINGLE-THREAD Y-PERMUTATION (.Call)
  * =============================================================================
  *
  * Uses same algorithm as legacy but with .Call interface.
  * R passes non-transposed matrices, C handles the layout conversion.
  */
 
-SEXP ridgeReg_old_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp, SEXP nrand_sexp) {
+SEXP ridgeReg_styp_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp, SEXP nrand_sexp) {
 
     /* Extract dimensions - R matrices are n×p and n×m */
     SEXP x_dim = getAttrib(X_sexp, R_DimSymbol);
@@ -511,14 +511,14 @@ SEXP ridgeReg_old_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp, SEXP nra
 
 
 /* =============================================================================
- * SECTION 6: VERSION 2 - SINGLE-THREADED T-PERMUTATION (.Call)
+ * SECTION 6: STTP - SINGLE-THREAD T-PERMUTATION (.Call)
  * =============================================================================
  *
  * Uses T-column permutation (scatter approach) which can be more cache-friendly
  * for certain matrix sizes.
  */
 
-SEXP ridgeRegTperm_old_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp, SEXP nrand_sexp) {
+SEXP ridgeReg_sttp_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp, SEXP nrand_sexp) {
 
     /* Extract dimensions */
     SEXP x_dim = getAttrib(X_sexp, R_DimSymbol);
@@ -635,11 +635,11 @@ SEXP ridgeRegTperm_old_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp, SEX
 
 
 /* =============================================================================
- * SECTION 7: VERSION 3 - MULTI-THREADED Y-PERMUTATION (OpenMP)
+ * SECTION 7: MTYP - MULTI-THREAD Y-PERMUTATION (OpenMP)
  * =============================================================================
  */
 
-SEXP ridgeRegFast_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp,
+SEXP ridgeReg_mtyp_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp,
                             SEXP nrand_sexp, SEXP ncores_sexp) {
 
     /* Configure OpenMP threads */
@@ -792,11 +792,11 @@ SEXP ridgeRegFast_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp,
 
 
 /* =============================================================================
- * SECTION 8: VERSION 4 - MULTI-THREADED T-PERMUTATION (OpenMP)
+ * SECTION 8: MTTP - MULTI-THREAD T-PERMUTATION (OpenMP)
  * =============================================================================
  */
 
-SEXP ridgeRegTperm_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp,
+SEXP ridgeReg_mttp_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp,
                               SEXP nrand_sexp, SEXP ncores_sexp) {
 
     /* Configure OpenMP threads */
@@ -965,10 +965,10 @@ static const R_CMethodDef cMethods[] = {
 };
 
 static const R_CallMethodDef callMethods[] = {
-    {"ridgeReg_old_interface",      (DL_FUNC) &ridgeReg_old_interface,      4},
-    {"ridgeRegTperm_old_interface", (DL_FUNC) &ridgeRegTperm_old_interface, 4},
-    {"ridgeRegFast_interface",      (DL_FUNC) &ridgeRegFast_interface,      5},
-    {"ridgeRegTperm_interface",     (DL_FUNC) &ridgeRegTperm_interface,     5},
+    {"ridgeReg_styp_interface",      (DL_FUNC) &ridgeReg_styp_interface,      4},
+    {"ridgeReg_sttp_interface", (DL_FUNC) &ridgeReg_sttp_interface, 4},
+    {"ridgeReg_mtyp_interface",      (DL_FUNC) &ridgeReg_mtyp_interface,      5},
+    {"ridgeReg_mttp_interface",     (DL_FUNC) &ridgeReg_mttp_interface,     5},
     {NULL, NULL, 0}
 };
 
