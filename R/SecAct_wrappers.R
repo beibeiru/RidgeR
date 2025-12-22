@@ -9,7 +9,8 @@
 SecAct.inference.gsl.legacy <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=1000)
 {
   if(SigMat=="SecAct") {
-    Xfile <- file.path(system.file(package = "SecAct"), "extdata/SecAct.tsv.gz")
+    Xfile <- file.path(system.system.file(package = "RidgeR"), "extdata/SecAct.tsv.gz")
+    if(!file.exists(Xfile)) stop("Default signature matrix not found.")
     X <- read.table(Xfile, sep="\t", check.names=FALSE)
   } else {
     X <- read.table(SigMat, sep="\t", check.names=FALSE)
@@ -22,13 +23,14 @@ SecAct.inference.gsl.legacy <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=
   n <- as.integer(nrow(X)); p <- as.integer(ncol(X)); m <- as.integer(ncol(Y))
   len <- p * m
   
+  # Note: PACKAGE must match the installed package name "RidgeR"
   res <- .C("ridgeReg",
             as.double(X), as.double(Y),
             n, p, m,
             as.double(lambda), as.double(nrand),
             beta = double(len), se = double(len), 
             zscore = double(len), pvalue = double(len),
-            PACKAGE = "SecAct")
+            PACKAGE = "RidgeR")
   
   formatter <- function(v) matrix(v, nrow=p, ncol=m, dimnames=list(colnames(X), colnames(Y)))
   list(beta = formatter(res$beta), se = formatter(res$se), 
@@ -36,12 +38,11 @@ SecAct.inference.gsl.legacy <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=
 }
 
 #' @title Secreted protein activity inference (Legacy .Call Version)
-#' @description Optimized single-threaded implementation using Y row permutation.
 #' @export
 SecAct.inference.gsl.old <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=1000)
 {
   if(SigMat=="SecAct") {
-    Xfile <- file.path(system.file(package = "SecAct"), "extdata/SecAct.tsv.gz")
+    Xfile <- file.path(system.file(package = "RidgeR"), "extdata/SecAct.tsv.gz")
     X <- read.table(Xfile, sep="\t", check.names=FALSE)
   } else {
     X <- read.table(SigMat, sep="\t", check.names=FALSE)
@@ -51,18 +52,17 @@ SecAct.inference.gsl.old <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=100
   X[is.na(X)] <- 0; Y[is.na(Y)] <- 0
   
   p <- ncol(X); m <- ncol(Y)
-  res <- .Call("ridgeReg_old_interface", X, Y, as.numeric(lambda), as.integer(nrand), PACKAGE="SecAct")
+  res <- .Call("ridgeReg_old_interface", X, Y, as.numeric(lambda), as.integer(nrand), PACKAGE="RidgeR")
   formatter <- function(v) matrix(v, nrow=p, ncol=m, dimnames=list(colnames(X), colnames(Y)))
   list(beta = formatter(res$beta), se = formatter(res$se), zscore = formatter(res$zscore), pvalue = formatter(res$pvalue))
 }
 
 #' @title Secreted protein activity inference (Legacy .Call T-Perm Version)
-#' @description Single-threaded implementation using cache-friendly T column permutation.
 #' @export
 SecAct.inference.gsl.old2 <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=1000)
 {
   if(SigMat=="SecAct") {
-    Xfile <- file.path(system.file(package = "SecAct"), "extdata/SecAct.tsv.gz")
+    Xfile <- file.path(system.file(package = "RidgeR"), "extdata/SecAct.tsv.gz")
     X <- read.table(Xfile, sep="\t", check.names=FALSE)
   } else {
     X <- read.table(SigMat, sep="\t", check.names=FALSE)
@@ -72,7 +72,7 @@ SecAct.inference.gsl.old2 <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=10
   X[is.na(X)] <- 0; Y[is.na(Y)] <- 0
   
   p <- ncol(X); m <- ncol(Y)
-  res <- .Call("ridgeRegTperm_old_interface", X, Y, as.numeric(lambda), as.integer(nrand), PACKAGE="SecAct")
+  res <- .Call("ridgeRegTperm_old_interface", X, Y, as.numeric(lambda), as.integer(nrand), PACKAGE="RidgeR")
   formatter <- function(v) matrix(v, nrow=p, ncol=m, dimnames=list(colnames(X), colnames(Y)))
   list(beta = formatter(res$beta), se = formatter(res$se), zscore = formatter(res$zscore), pvalue = formatter(res$pvalue))
 }
@@ -82,7 +82,7 @@ SecAct.inference.gsl.old2 <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=10
 SecAct.inference.gsl.new <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=1000, ncores=NULL)
 {
   if(SigMat=="SecAct") {
-    Xfile <- file.path(system.file(package = "SecAct"), "extdata/SecAct.tsv.gz")
+    Xfile <- file.path(system.file(package = "RidgeR"), "extdata/SecAct.tsv.gz")
     X <- read.table(Xfile, sep="\t", check.names=FALSE)
   } else {
     X <- read.table(SigMat, sep="\t", check.names=FALSE)
@@ -93,7 +93,7 @@ SecAct.inference.gsl.new <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=100
   
   if(is.null(ncores)) ncores <- max(1, parallel::detectCores(logical = FALSE) - 1)
   p <- ncol(X); m <- ncol(Y)
-  res <- .Call("ridgeRegFast_interface", X, Y, as.numeric(lambda), as.integer(nrand), as.integer(ncores), PACKAGE="SecAct")
+  res <- .Call("ridgeRegFast_interface", X, Y, as.numeric(lambda), as.integer(nrand), as.integer(ncores), PACKAGE="RidgeR")
   formatter <- function(v) matrix(v, nrow=p, ncol=m, dimnames=list(colnames(X), colnames(Y)))
   list(beta = formatter(res$beta), se = formatter(res$se), zscore = formatter(res$zscore), pvalue = formatter(res$pvalue))
 }
@@ -103,7 +103,7 @@ SecAct.inference.gsl.new <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=100
 SecAct.inference.gsl.new2 <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=1000, ncores=NULL)
 {
   if(SigMat=="SecAct") {
-    Xfile <- file.path(system.file(package = "SecAct"), "extdata/SecAct.tsv.gz")
+    Xfile <- file.path(system.file(package = "RidgeR"), "extdata/SecAct.tsv.gz")
     X <- read.table(Xfile, sep="\t", check.names=FALSE)
   } else {
     X <- read.table(SigMat, sep="\t", check.names=FALSE)
@@ -114,7 +114,7 @@ SecAct.inference.gsl.new2 <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=10
   
   if(is.null(ncores)) ncores <- max(1, parallel::detectCores(logical = FALSE) - 1)
   p <- ncol(X); m <- ncol(Y)
-  res <- .Call("ridgeRegTperm_interface", X, Y, as.numeric(lambda), as.integer(nrand), as.integer(ncores), PACKAGE="SecAct")
+  res <- .Call("ridgeRegTperm_interface", X, Y, as.numeric(lambda), as.integer(nrand), as.integer(ncores), PACKAGE="RidgeR")
   formatter <- function(v) matrix(v, nrow=p, ncol=m, dimnames=list(colnames(X), colnames(Y)))
   list(beta = formatter(res$beta), se = formatter(res$se), zscore = formatter(res$zscore), pvalue = formatter(res$pvalue))
 }
