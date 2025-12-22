@@ -31,7 +31,6 @@ SecAct.inference.gsl.old <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=100
                as.numeric(lambda), 
                as.integer(nrand))
   
-  # Note: C code outputs row-major, use byrow=TRUE
   formatter <- function(v) {
     matrix(v, byrow=TRUE, nrow=p, ncol=m, 
            dimnames=list(colnames(X), colnames(Y)))
