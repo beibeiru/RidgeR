@@ -149,8 +149,11 @@ NULL
 
 #' Format result vector as named matrix
 #'
-#' @param v Flat result vector
-#' @param X Signature matrix (for column names = proteins)
+#' GSL stores matrices in row-major order, so we need byrow=TRUE
+#' to correctly interpret the flat vector in R's column-major convention.
+#'
+#' @param v Flat result vector (from GSL row-major matrix)
+#' @param X Signature matrix (for row names = proteins)
 #' @param Y Expression matrix (for column names = samples)
 #' @return Matrix with appropriate dimensions and names
 #' @keywords internal
@@ -159,6 +162,7 @@ NULL
         v,
         nrow = ncol(X),
         ncol = ncol(Y),
+        byrow = TRUE,  # GSL uses row-major order
         dimnames = list(colnames(X), colnames(Y))
     )
 }
@@ -218,11 +222,12 @@ SecAct.inference.gsl.legacy <- function(Y,
     m <- as.integer(ncol(Y))  # Number of samples
     len <- p * m
 
-    # Call C function
+    # Call C function - NOTE: must transpose matrices for correct memory layout
+    # R stores column-major, GSL expects row-major, so t(X) in R = X in GSL
     res <- .C(
         "ridgeReg",
-        as.double(X),
-        as.double(Y),
+        as.double(t(X)),   # Transpose for correct GSL interpretation
+        as.double(t(Y)),   # Transpose for correct GSL interpretation
         n,
         p,
         m,
@@ -235,12 +240,16 @@ SecAct.inference.gsl.legacy <- function(Y,
         PACKAGE = "RidgeR"
     )
 
-    # Format and return results
+    # Format and return results - note byrow=TRUE to match original
     list(
-        beta   = .format_result(res$beta,   X, Y),
-        se     = .format_result(res$se,     X, Y),
-        zscore = .format_result(res$zscore, X, Y),
-        pvalue = .format_result(res$pvalue, X, Y)
+        beta   = matrix(res$beta, byrow = TRUE, ncol = m,
+                       dimnames = list(colnames(X), colnames(Y))),
+        se     = matrix(res$se, byrow = TRUE, ncol = m,
+                       dimnames = list(colnames(X), colnames(Y))),
+        zscore = matrix(res$zscore, byrow = TRUE, ncol = m,
+                       dimnames = list(colnames(X), colnames(Y))),
+        pvalue = matrix(res$pvalue, byrow = TRUE, ncol = m,
+                       dimnames = list(colnames(X), colnames(Y)))
     )
 }
 
@@ -554,13 +563,13 @@ SecAct.activity.inference <- function(
                 PACKAGE = "RidgeR"
             )
             list(
-                beta   = matrix(raw$beta, nrow = ncol(X), ncol = ncol(Y),
+                beta   = matrix(raw$beta, nrow = ncol(X), ncol = ncol(Y), byrow = TRUE,
                                dimnames = list(colnames(X), colnames(Y))),
-                se     = matrix(raw$se, nrow = ncol(X), ncol = ncol(Y),
+                se     = matrix(raw$se, nrow = ncol(X), ncol = ncol(Y), byrow = TRUE,
                                dimnames = list(colnames(X), colnames(Y))),
-                zscore = matrix(raw$zscore, nrow = ncol(X), ncol = ncol(Y),
+                zscore = matrix(raw$zscore, nrow = ncol(X), ncol = ncol(Y), byrow = TRUE,
                                dimnames = list(colnames(X), colnames(Y))),
-                pvalue = matrix(raw$pvalue, nrow = ncol(X), ncol = ncol(Y),
+                pvalue = matrix(raw$pvalue, nrow = ncol(X), ncol = ncol(Y), byrow = TRUE,
                                dimnames = list(colnames(X), colnames(Y)))
             )
         },
@@ -574,13 +583,13 @@ SecAct.activity.inference <- function(
                 PACKAGE = "RidgeR"
             )
             list(
-                beta   = matrix(raw$beta, nrow = ncol(X), ncol = ncol(Y),
+                beta   = matrix(raw$beta, nrow = ncol(X), ncol = ncol(Y), byrow = TRUE,
                                dimnames = list(colnames(X), colnames(Y))),
-                se     = matrix(raw$se, nrow = ncol(X), ncol = ncol(Y),
+                se     = matrix(raw$se, nrow = ncol(X), ncol = ncol(Y), byrow = TRUE,
                                dimnames = list(colnames(X), colnames(Y))),
-                zscore = matrix(raw$zscore, nrow = ncol(X), ncol = ncol(Y),
+                zscore = matrix(raw$zscore, nrow = ncol(X), ncol = ncol(Y), byrow = TRUE,
                                dimnames = list(colnames(X), colnames(Y))),
-                pvalue = matrix(raw$pvalue, nrow = ncol(X), ncol = ncol(Y),
+                pvalue = matrix(raw$pvalue, nrow = ncol(X), ncol = ncol(Y), byrow = TRUE,
                                dimnames = list(colnames(X), colnames(Y)))
             )
         },
@@ -595,13 +604,13 @@ SecAct.activity.inference <- function(
                 PACKAGE = "RidgeR"
             )
             list(
-                beta   = matrix(raw$beta, nrow = ncol(X), ncol = ncol(Y),
+                beta   = matrix(raw$beta, nrow = ncol(X), ncol = ncol(Y), byrow = TRUE,
                                dimnames = list(colnames(X), colnames(Y))),
-                se     = matrix(raw$se, nrow = ncol(X), ncol = ncol(Y),
+                se     = matrix(raw$se, nrow = ncol(X), ncol = ncol(Y), byrow = TRUE,
                                dimnames = list(colnames(X), colnames(Y))),
-                zscore = matrix(raw$zscore, nrow = ncol(X), ncol = ncol(Y),
+                zscore = matrix(raw$zscore, nrow = ncol(X), ncol = ncol(Y), byrow = TRUE,
                                dimnames = list(colnames(X), colnames(Y))),
-                pvalue = matrix(raw$pvalue, nrow = ncol(X), ncol = ncol(Y),
+                pvalue = matrix(raw$pvalue, nrow = ncol(X), ncol = ncol(Y), byrow = TRUE,
                                dimnames = list(colnames(X), colnames(Y)))
             )
         },
@@ -616,13 +625,13 @@ SecAct.activity.inference <- function(
                 PACKAGE = "RidgeR"
             )
             list(
-                beta   = matrix(raw$beta, nrow = ncol(X), ncol = ncol(Y),
+                beta   = matrix(raw$beta, nrow = ncol(X), ncol = ncol(Y), byrow = TRUE,
                                dimnames = list(colnames(X), colnames(Y))),
-                se     = matrix(raw$se, nrow = ncol(X), ncol = ncol(Y),
+                se     = matrix(raw$se, nrow = ncol(X), ncol = ncol(Y), byrow = TRUE,
                                dimnames = list(colnames(X), colnames(Y))),
-                zscore = matrix(raw$zscore, nrow = ncol(X), ncol = ncol(Y),
+                zscore = matrix(raw$zscore, nrow = ncol(X), ncol = ncol(Y), byrow = TRUE,
                                dimnames = list(colnames(X), colnames(Y))),
-                pvalue = matrix(raw$pvalue, nrow = ncol(X), ncol = ncol(Y),
+                pvalue = matrix(raw$pvalue, nrow = ncol(X), ncol = ncol(Y), byrow = TRUE,
                                dimnames = list(colnames(X), colnames(Y)))
             )
         },
