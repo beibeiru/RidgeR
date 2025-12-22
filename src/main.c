@@ -27,7 +27,7 @@ int* generate_perm_table(int n, int nrand) {
     int *table = (int*)malloc((size_t)nrand * (size_t)n * sizeof(int));
     int *base_idx = (int*)malloc((size_t)n * sizeof(int));
     for(int i=0; i<n; i++) base_idx[i] = i;
-    srand(0); // Synchronize seed for all versions
+    srand(0); 
     for(int i=0; i<nrand; i++) {
         shuffle(base_idx, n);
         memcpy(table + ((size_t)i * n), base_idx, n * sizeof(int));
@@ -222,20 +222,34 @@ SEXP ridgeRegFast_interface(SEXP X_s, SEXP Y_s, SEXP lambda_s, SEXP nrand_s, SEX
 
     int *p_tab = generate_perm_table((int)n, nrand);
     int actual_threads = 1;
+
     #ifdef _OPENMP
-      #pragma omp parallel
-      { #pragma omp single { actual_threads = omp_get_num_threads(); } }
+    #pragma omp parallel
+    {
+        #pragma omp single
+        {
+            actual_threads = omp_get_num_threads();
+        }
+    }
     #endif
+
     double *th_s = (double*)calloc((size_t)actual_threads * len, sizeof(double));
     double *th_q = (double*)calloc((size_t)actual_threads * len, sizeof(double));
     double *th_c = (double*)calloc((size_t)actual_threads * len, sizeof(double));
 
     #pragma omp parallel
     {
-        int tid = 0; #ifdef _OPENMP
-        tid = omp_get_thread_num(); #endif
-        double *ms = &th_s[(size_t)tid * len], *mq = &th_q[(size_t)tid * len], *mc = &th_c[(size_t)tid * len];
+        int tid = 0; 
+        #ifdef _OPENMP
+        tid = omp_get_thread_num(); 
+        #endif
+
+        double *ms = &th_s[(size_t)tid * len];
+        double *mq = &th_q[(size_t)tid * len];
+        double *mc = &th_c[(size_t)tid * len];
+
         gsl_matrix *Yp = gsl_matrix_alloc(n, m), *br = gsl_matrix_alloc(p, m);
+        
         #pragma omp for schedule(dynamic)
         for(int i = 0; i < nrand; i++) {
             int *pidx = p_tab + ((size_t)i * n);
@@ -248,15 +262,22 @@ SEXP ridgeRegFast_interface(SEXP X_s, SEXP Y_s, SEXP lambda_s, SEXP nrand_s, SEX
         }
         gsl_matrix_free(Yp); gsl_matrix_free(br);
     }
+
     for(int t=0; t<actual_threads; t++) {
-        for(R_xlen_t i=0; i<len; i++) { zv[i] += th_s[(size_t)t*len+i]; sv[i] += th_q[(size_t)t*len+i]; pv[i] += th_c[(size_t)t*len+i]; }
+        for(R_xlen_t i=0; i<len; i++) { 
+            zv[i] += th_s[(size_t)t*len+i]; 
+            sv[i] += th_q[(size_t)t*len+i]; 
+            pv[i] += th_c[(size_t)t*len+i]; 
+        }
     }
+
     double inv_n = 1.0 / nrand;
     for(R_xlen_t i=0; i<len; i++) {
         double mean = zv[i] * inv_n; double var = (sv[i] * inv_n) - (mean * mean);
         sv[i] = sqrt(fmax(0.0, var)); zv[i] = (sv[i] > 1e-12) ? (bv[i] - mean) / sv[i] : 0.0;
         pv[i] = (pv[i] + 1.0) / (nrand + 1.0);
     }
+
     free(th_s); free(th_q); free(th_c); free(p_tab); gsl_matrix_free(I); gsl_matrix_free(T); gsl_matrix_free(Yr);
     SEXP res = create_res_list(b_s, s_s, z_s, p_s); UNPROTECT(4); return res;
 }
@@ -289,18 +310,34 @@ SEXP ridgeRegTperm_interface(SEXP X_s, SEXP Y_s, SEXP lambda_s, SEXP nrand_s, SE
     gsl_matrix *Tt_o = gsl_matrix_alloc(n, p); gsl_matrix_transpose_memcpy(Tt_o, T);
     int *p_tab = generate_perm_table((int)n, nrand);
     int actual_threads = 1;
+
     #ifdef _OPENMP
-      #pragma omp parallel
-      { #pragma omp single { actual_threads = omp_get_num_threads(); } }
+    #pragma omp parallel
+    {
+        #pragma omp single
+        {
+            actual_threads = omp_get_num_threads();
+        }
+    }
     #endif
-    double *th_s = (double*)calloc((size_t)actual_threads * len, sizeof(double)), *th_q = (double*)calloc((size_t)actual_threads * len, sizeof(double)), *th_c = (double*)calloc((size_t)actual_threads * len, sizeof(double));
+
+    double *th_s = (double*)calloc((size_t)actual_threads * len, sizeof(double));
+    double *th_q = (double*)calloc((size_t)actual_threads * len, sizeof(double));
+    double *th_c = (double*)calloc((size_t)actual_threads * len, sizeof(double));
 
     #pragma omp parallel
     {
-        int tid = 0; #ifdef _OPENMP
-        tid = omp_get_thread_num(); #endif
-        double *ms = &th_s[(size_t)tid * len], *mq = &th_q[(size_t)tid * len], *mc = &th_c[(size_t)tid * len];
+        int tid = 0; 
+        #ifdef _OPENMP
+        tid = omp_get_thread_num(); 
+        #endif
+
+        double *ms = &th_s[(size_t)tid * len];
+        double *mq = &th_q[(size_t)tid * len];
+        double *mc = &th_c[(size_t)tid * len];
+
         gsl_matrix *Ttp = gsl_matrix_alloc(n, p), *br = gsl_matrix_alloc(p, m);
+        
         #pragma omp for schedule(dynamic, 16)
         for(int i_r = 0; i_r < nrand; i_r++) {
             int *pidx = p_tab + ((size_t)i_r * n);
@@ -313,9 +350,15 @@ SEXP ridgeRegTperm_interface(SEXP X_s, SEXP Y_s, SEXP lambda_s, SEXP nrand_s, SE
         }
         gsl_matrix_free(Ttp); gsl_matrix_free(br);
     }
+
     for(int t=0; t<actual_threads; t++) {
-        for(R_xlen_t i=0; i<len; i++) { zv[i] += th_s[(size_t)t*len+i]; sv[i] += th_q[(size_t)t*len+i]; pv[i] += th_c[(size_t)t*len+i]; }
+        for(R_xlen_t i=0; i<len; i++) { 
+            zv[i] += th_s[(size_t)t*len+i]; 
+            sv[i] += th_q[(size_t)t*len+i]; 
+            pv[i] += th_c[(size_t)t*len+i]; 
+        }
     }
+
     double inv_n = 1.0 / nrand;
     for(R_xlen_t i = 0; i < len; i++) {
         double mean = zv[i] * inv_n; double var = (sv[i] * inv_n) - (mean * mean);
