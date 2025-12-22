@@ -279,7 +279,7 @@ SecAct.inference.gsl.styp <- function(Y,
 
     # Call C function
     res <- .Call(
-        "ridgeReg_old_interface",
+        "ridgeReg_styp_interface",
         prep$X,
         prep$Y,
         as.numeric(lambda),
@@ -318,7 +318,7 @@ SecAct.inference.gsl.sttp <- function(Y,
 
     # Call C function
     res <- .Call(
-        "ridgeRegTperm_old_interface",
+        "ridgeReg_sttp_interface",
         prep$X,
         prep$Y,
         as.numeric(lambda),
@@ -364,7 +364,7 @@ SecAct.inference.gsl.mtyp <- function(Y,
 
     # Call C function
     res <- .Call(
-        "ridgeRegFast_interface",
+        "ridgeReg_mtyp_interface",
         prep$X,
         prep$Y,
         as.numeric(lambda),
@@ -405,7 +405,7 @@ SecAct.inference.gsl.mttp <- function(Y,
 
     # Call C function
     res <- .Call(
-        "ridgeRegTperm_interface",
+        "ridgeReg_mttp_interface",
         prep$X,
         prep$Y,
         as.numeric(lambda),
@@ -700,7 +700,7 @@ SecAct.activity.inference <- function(
         "styp" = {
             # .Call interface expects NON-transposed matrices
             raw <- .Call(
-                "ridgeReg_old_interface",
+                "ridgeReg_styp_interface",
                 X, Y,
                 as.numeric(lambda),
                 as.integer(nrand),
@@ -720,7 +720,7 @@ SecAct.activity.inference <- function(
         "sttp" = {
             # .Call interface expects NON-transposed matrices
             raw <- .Call(
-                "ridgeRegTperm_old_interface",
+                "ridgeReg_sttp_interface",
                 X, Y,
                 as.numeric(lambda),
                 as.integer(nrand),
@@ -740,7 +740,7 @@ SecAct.activity.inference <- function(
         "mtyp" = {
             # .Call interface expects NON-transposed matrices
             raw <- .Call(
-                "ridgeRegFast_interface",
+                "ridgeReg_mtyp_interface",
                 X, Y,
                 as.numeric(lambda),
                 as.integer(nrand),
@@ -761,7 +761,7 @@ SecAct.activity.inference <- function(
         "mttp" = {
             # .Call interface expects NON-transposed matrices
             raw <- .Call(
-                "ridgeRegTperm_interface",
+                "ridgeReg_mttp_interface",
                 X, Y,
                 as.numeric(lambda),
                 as.integer(nrand),
