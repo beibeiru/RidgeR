@@ -1,36 +1,63 @@
 #include <R.h>
-#include <Rinternals.h>
-#include <R_ext/Rdynload.h>
+#include <Rinternals.h> // Required for .Call
+#include <R_ext/Rdynload.h> // For registration
 #include <gsl/gsl_matrix.h>
 #include <gsl/gsl_blas.h>
 #include <gsl/gsl_linalg.h>
-#include <string.h>
-#include <time.h>
-#include <math.h>
+#include <string.h> // for memcpy
+#include <time.h>   // for seed
+#include <math.h>   // for sqrt, fabs
 
 #ifdef _OPENMP
-#include <omp.h>
+  #include <omp.h>    // for OpenMP
 #endif
 
-// Tuning parameters for the Fast version
-#define SAMPLE_STRIP_SIZE 64
+// --- TUNING ---
+// Number of samples (columns) a thread processes at one time.
+// 64 is small enough to fit in cache, large enough for BLAS efficiency.
+// This keeps memory usage CONSTANT per thread, regardless of m.
+#define SAMPLE_STRIP_SIZE 64 
+
+// Batch of permutations. 
 #define PERM_BATCH_SIZE 64
 
 /* =========================================================
    HELPER FUNCTIONS
    ========================================================= */
 
-void shuffle(int array[], const int n) {
-    int i, j, t;
-    for (i = 0; i < n - 1; i++) {
-        j = i + rand() / (RAND_MAX / (n - i) + 1);
-        t = array[j];
-        array[j] = array[i];
-        array[i] = t;
-    }
+gsl_matrix *RVectorObject_to_gsl_matrix(double *vec, size_t nr, size_t nc)
+{
+  gsl_block *b = (gsl_block*)malloc(sizeof(gsl_block));
+  gsl_matrix *r = (gsl_matrix*)malloc(sizeof(gsl_matrix));
+  r->size1 = nr;
+  r->tda = r->size2 = nc;
+  r->owner = 1; 
+  b->data = r->data = vec;
+  r->block = b;
+  b->size = r->size1 * r->size2;
+  return r;
 }
 
-// Wraps the four result vectors into a named R list
+void gsl_matrix_partial_free(gsl_matrix *x)
+{
+  if(x) {
+    if(x->block) free(x->block);
+    free(x);
+  }
+}
+
+void shuffle(int array[], const int n)
+{
+  int i, j;
+  double t;
+  for (i = 0; i < n-1; i++) {
+    j = i + rand() / (RAND_MAX / (n - i) + 1);
+    t = array[j];
+    array[j] = array[i];
+    array[i] = t;
+  }
+}
+
 SEXP create_res_list(SEXP beta, SEXP se, SEXP zscore, SEXP pvalue) {
     SEXP res_list = PROTECT(allocVector(VECSXP, 4));
     SET_VECTOR_ELT(res_list, 0, beta);
@@ -50,13 +77,110 @@ SEXP create_res_list(SEXP beta, SEXP se, SEXP zscore, SEXP pvalue) {
 }
 
 /* =========================================================
-   VERSION 1: OLD (Single-threaded, Y Row Permutation)
+   OLD VERSION
+   ========================================================= */
+void ridgeReg(
+  double *X_vec, double *Y_vec,
+  int *n_pt, int *p_pt, int *m_pt,
+  double *lambda_pt, double *nrand_pt,
+  double *beta_vec, double *se_vec, double *zscore_vec, double *pvalue_vec
+)
+{
+  gsl_matrix *X, *Y, *I, *T, *beta, *Y_rand, *beta_rand, *aver, *aver_sq, *zscore, *pvalue;
+  int n = *n_pt, p = *p_pt, m = *m_pt, nrand = (int)*nrand_pt;
+  double lambda = *lambda_pt;
+  int *array_index, i, j;
+
+  X = RVectorObject_to_gsl_matrix(X_vec, n, p);
+  Y = RVectorObject_to_gsl_matrix(Y_vec, n, m);
+  beta = RVectorObject_to_gsl_matrix(beta_vec, p, m);
+  aver_sq = RVectorObject_to_gsl_matrix(se_vec, p, m);
+  zscore = RVectorObject_to_gsl_matrix(zscore_vec, p, m);
+  pvalue = RVectorObject_to_gsl_matrix(pvalue_vec, p, m);
+
+  I = gsl_matrix_alloc(p, p);
+  T = gsl_matrix_alloc(p, n);
+  Y_rand = gsl_matrix_alloc(n, m);
+  beta_rand = gsl_matrix_alloc(p, m);
+  aver = gsl_matrix_alloc(p, m);
+  array_index = (int*)malloc(n*sizeof(int));
+
+  gsl_matrix_set_identity(I);
+  gsl_blas_dsyrk(CblasLower, CblasTrans, 1.0, X, lambda, I);
+  gsl_linalg_cholesky_decomp(I);
+  gsl_linalg_cholesky_invert(I);
+  gsl_blas_dgemm(CblasNoTrans, CblasTrans, 1.0, I, X, 0.0, T);
+  gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, Y, 0.0, beta);
+
+  srand(0);
+  for(i=0;i<n;i++) array_index[i] = i;
+
+  gsl_matrix_set_zero(aver);
+  gsl_matrix_set_zero(aver_sq);
+  gsl_matrix_set_zero(pvalue);
+
+  for(i=0;i<nrand;i++)
+  {
+    shuffle(array_index, n);
+
+    for(j=0;j<n;j++){
+      gsl_vector_const_view t = gsl_matrix_const_row(Y, array_index[j]);
+      gsl_matrix_set_row(Y_rand, j, &t.vector);
+    }
+
+    gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, Y_rand, 0.0, beta_rand);
+
+    for(j=0; j< pvalue->size1 * pvalue->size2; j++) {
+      if(fabs(beta_rand->data[j]) >= fabs(beta->data[j])) pvalue->data[j]++;
+    }
+
+    gsl_matrix_add(aver, beta_rand);
+    gsl_matrix_mul_elements(beta_rand, beta_rand);
+    gsl_matrix_add(aver_sq, beta_rand);
+  }
+
+  gsl_matrix_scale(aver, 1.0/ nrand);
+  gsl_matrix_scale(aver_sq, 1.0/ nrand);
+
+  gsl_matrix_add_constant(pvalue, 1.0);
+  gsl_matrix_scale(pvalue, 1.0/ (nrand+1));
+
+  gsl_matrix_memcpy(zscore, beta);
+  gsl_matrix_sub(zscore, aver);
+
+  gsl_matrix_mul_elements(aver, aver);
+  gsl_matrix_sub(aver_sq, aver);
+
+  for(i=0;i< aver_sq->size1 * aver_sq->size2; i++) {
+    aver_sq->data[i] = sqrt(aver_sq->data[i]);
+  }
+
+  gsl_matrix_div_elements(zscore, aver_sq);
+
+  gsl_matrix_free(I);
+  gsl_matrix_free(T);
+  gsl_matrix_free(Y_rand);
+  gsl_matrix_free(beta_rand);
+  gsl_matrix_free(aver);
+  free(array_index);
+  gsl_matrix_partial_free(beta);
+  gsl_matrix_partial_free(aver_sq);
+  gsl_matrix_partial_free(zscore);
+  gsl_matrix_partial_free(pvalue);
+}
+
+/* =========================================================
+   VERSION 1: OLD (Optimized .Call version)
    ========================================================= */
 SEXP ridgeReg_old_interface(SEXP X_s, SEXP Y_s, SEXP lambda_s, SEXP nrand_s) {
     SEXP x_dim = getAttrib(X_s, R_DimSymbol);
-    size_t n = (size_t)INTEGER(x_dim)[0], p = (size_t)INTEGER(x_dim)[1];
+    // Interpreting Col-Major R matrix (n x p) as Row-Major GSL (n x p)
+    // This effectively transposes the matrix, matching the logic of your fast .C version
+    int n = INTEGER(x_dim)[0]; 
+    int p = INTEGER(x_dim)[1];
     SEXP y_dim = getAttrib(Y_s, R_DimSymbol);
-    size_t m = (size_t)INTEGER(y_dim)[1];
+    int m = INTEGER(y_dim)[1];
+    
     int nrand = asInteger(nrand_s);
     double lambda = asReal(lambda_s);
 
@@ -65,57 +189,89 @@ SEXP ridgeReg_old_interface(SEXP X_s, SEXP Y_s, SEXP lambda_s, SEXP nrand_s) {
     SEXP s_s = PROTECT(allocVector(REALSXP, total_len));
     SEXP z_s = PROTECT(allocVector(REALSXP, total_len));
     SEXP p_s = PROTECT(allocVector(REALSXP, total_len));
-    double *bv = REAL(b_s), *sv = REAL(s_s), *zv = REAL(z_s), *pv = REAL(p_s);
 
-    gsl_matrix_view Xt = gsl_matrix_view_array(REAL(X_s), p, n);
-    gsl_matrix_view Yt = gsl_matrix_view_array(REAL(Y_s), m, n);
+    // Create Views
+    gsl_matrix_view X = gsl_matrix_view_array(REAL(X_s), n, p);
+    gsl_matrix_view Y = gsl_matrix_view_array(REAL(Y_s), n, m);
+    gsl_matrix_view beta = gsl_matrix_view_array(REAL(b_s), p, m);
+    gsl_matrix_view aver_sq = gsl_matrix_view_array(REAL(s_s), p, m);
+    gsl_matrix_view zscore = gsl_matrix_view_array(REAL(z_s), p, m);
+    gsl_matrix_view pvalue = gsl_matrix_view_array(REAL(p_s), p, m);
+
+    // Allocate workspace
     gsl_matrix *I = gsl_matrix_alloc(p, p);
     gsl_matrix *T = gsl_matrix_alloc(p, n);
-    
+    gsl_matrix *Y_rand = gsl_matrix_alloc(n, m);
+    gsl_matrix *beta_rand = gsl_matrix_alloc(p, m);
+    gsl_matrix *aver = gsl_matrix_alloc(p, m);
+
+    // Ridge Math: T = (X'X + lambda*I)^-1 * X'
     gsl_matrix_set_identity(I);
-    gsl_blas_dsyrk(CblasLower, CblasNoTrans, 1.0, &Xt.matrix, lambda, I);
+    gsl_blas_dsyrk(CblasLower, CblasTrans, 1.0, &X.matrix, lambda, I);
     gsl_linalg_cholesky_decomp(I);
     gsl_linalg_cholesky_invert(I);
-    gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, I, &Xt.matrix, 0.0, T);
+    gsl_blas_dgemm(CblasNoTrans, CblasTrans, 1.0, I, &X.matrix, 0.0, T);
     
-    gsl_matrix_view bo = gsl_matrix_view_array(bv, p, m);
-    gsl_blas_dgemm(CblasNoTrans, CblasTrans, 1.0, T, &Yt.matrix, 0.0, &bo.matrix);
+    // Observed Beta
+    gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, &Y.matrix, 0.0, &beta.matrix);
 
-    int *idx = (int*)malloc(n * sizeof(int));
-    for(size_t i=0; i<n; i++) idx[i] = (int)i;
+    int *array_index = (int*)malloc(n * sizeof(int));
+    for(int i=0; i<n; i++) array_index[i] = i;
     srand(0);
-    for(R_xlen_t i=0; i<total_len; i++) { pv[i]=0; sv[i]=0; zv[i]=0; }
 
-    gsl_matrix *Y_perm = gsl_matrix_alloc(n, m);
-    gsl_matrix *br = gsl_matrix_alloc(p, m);
+    gsl_matrix_set_zero(aver);
+    gsl_matrix_set_zero(&aver_sq.matrix);
+    gsl_matrix_set_zero(&pvalue.matrix);
 
+    // Permutation Loop
     for(int i=0; i<nrand; i++) {
-        shuffle(idx, (int)n);
-        for(size_t g=0; g<n; g++) {
-            for(size_t s=0; s<m; s++) {
-                gsl_matrix_set(Y_perm, g, s, gsl_matrix_get(&Yt.matrix, s, idx[g]));
-            }
+        shuffle(array_index, n);
+
+        // FAST ROW COPIES (Avoids element-wise loop)
+        for(int j=0; j<n; j++) {
+            gsl_vector_const_view src_row = gsl_matrix_const_row(&Y.matrix, array_index[j]);
+            gsl_matrix_set_row(Y_rand, j, &src_row.vector);
         }
-        gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, Y_perm, 0.0, br);
-        for(R_xlen_t k=0; k < total_len; k++) {
-            if(fabs(br->data[k]) >= fabs(bv[k])) pv[k] += 1.0;
-            zv[k] += br->data[k]; sv[k] += br->data[k] * br->data[k];
+
+        gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, Y_rand, 0.0, beta_rand);
+
+        // Vectorized accumulation for p-values
+        double *br_ptr = beta_rand->data;
+        double *bo_ptr = beta.matrix.data;
+        double *pv_ptr = pvalue.matrix.data;
+        for(int j=0; j < p*m; j++) {
+            if(fabs(br_ptr[j]) >= fabs(bo_ptr[j])) pv_ptr[j]++;
         }
+
+        gsl_matrix_add(aver, beta_rand);
+        gsl_matrix_mul_elements(beta_rand, beta_rand);
+        gsl_matrix_add(&aver_sq.matrix, beta_rand);
     }
 
-    double inv_n = 1.0 / nrand;
-    for(R_xlen_t i=0; i < total_len; i++) {
-        pv[i] = (pv[i] + 1.0) / (nrand + 1.0);
-        double mr = zv[i] * inv_n;
-        double vr = (sv[i] * inv_n) - (mr * mr);
-        double sr = sqrt(fmax(0, vr));
-        sv[i] = sr;
-        zv[i] = (sr > 1e-12) ? (bv[i] - mr) / sr : 0.0;
+    // Statistics Finalization
+    gsl_matrix_scale(aver, 1.0/nrand);
+    gsl_matrix_scale(&aver_sq.matrix, 1.0/nrand);
+    gsl_matrix_add_constant(&pvalue.matrix, 1.0);
+    gsl_matrix_scale(&pvalue.matrix, 1.0/(nrand + 1.0));
+    
+    gsl_matrix_memcpy(&zscore.matrix, &beta.matrix);
+    gsl_matrix_sub(&zscore.matrix, aver);
+    gsl_matrix_mul_elements(aver, aver);
+    gsl_matrix_sub(&aver_sq.matrix, aver);
+    
+    for(int i=0; i < p*m; i++) {
+        aver_sq.matrix.data[i] = sqrt(fmax(0, aver_sq.matrix.data[i]));
     }
+    gsl_matrix_div_elements(&zscore.matrix, &aver_sq.matrix);
 
-    free(idx); gsl_matrix_free(I); gsl_matrix_free(T); gsl_matrix_free(Y_perm); gsl_matrix_free(br);
+    // Cleanup
+    free(array_index);
+    gsl_matrix_free(I); gsl_matrix_free(T); gsl_matrix_free(Y_rand);
+    gsl_matrix_free(beta_rand); gsl_matrix_free(aver);
+
     SEXP res = create_res_list(b_s, s_s, z_s, p_s);
-    UNPROTECT(4); return res;
+    UNPROTECT(4);
+    return res;
 }
 
 /* =========================================================
