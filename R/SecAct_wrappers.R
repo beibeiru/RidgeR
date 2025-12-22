@@ -1,3 +1,51 @@
+## ================================
+## Internal helper functions
+## ================================
+
+.load_signature <- function(SigMat) {
+  if (SigMat == "SecAct") {
+    Xfile <- file.path(system.file(package = "RidgeR"), "extdata/SecAct.tsv.gz")
+    if (!file.exists(Xfile)) {
+      stop("Default signature matrix not found.")
+    }
+    read.table(Xfile, sep = "\t", check.names = FALSE)
+  } else {
+    read.table(SigMat, sep = "\t", check.names = FALSE)
+  }
+}
+
+.prepare_matrices <- function(X, Y) {
+  olp <- intersect(rownames(Y), rownames(X))
+  X <- scale(as.matrix(X[olp, , drop = FALSE]))
+  Y <- scale(as.matrix(Y[olp, , drop = FALSE]))
+
+  X[is.na(X)] <- 0
+  Y[is.na(Y)] <- 0
+
+  list(X = X, Y = Y)
+}
+
+.format_result <- function(v, X, Y) {
+  matrix(
+    v,
+    nrow = ncol(X),
+    ncol = ncol(Y),
+    dimnames = list(colnames(X), colnames(Y))
+  )
+}
+
+.default_ncores <- function(ncores) {
+  if (is.null(ncores)) {
+    max(1, parallel::detectCores(logical = FALSE) - 1)
+  } else {
+    ncores
+  }
+}
+
+## ================================
+## Inference implementations
+## ================================
+
 #' @title Secreted protein activity inference (Legacy .C Version)
 #' @description Original implementation using the legacy .C interface.
 #' @param Y Gene expression matrix (genes x samples).
@@ -6,25 +54,41 @@
 #' @param nrand Number of randomizations (default: 1000).
 #' @return List with beta, se, zscore, pvalue matrices (proteins x samples).
 #' @export
-SecAct.inference.gsl.legacy <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=1000)
-{
-  if(SigMat=="SecAct") {
-    Xfile <- file.path(system.file(package = "RidgeR"), "extdata/SecAct.tsv.gz")
-    if(!file.exists(Xfile)) stop("Default signature matrix not found.")
-    X <- read.table(Xfile, sep="\t", check.names=FALSE)
-  } else {
-    X <- read.table(SigMat, sep="\t", check.names=FALSE)
-  }
-  olp <- intersect(row.names(Y), row.names(X))
-  X <- scale(as.matrix(X[olp, , drop=FALSE])); Y <- scale(as.matrix(Y[olp, , drop=FALSE]))
-  X[is.na(X)] <- 0; Y[is.na(Y)] <- 0
-  n <- as.integer(nrow(X)); p <- as.integer(ncol(X)); m <- as.integer(ncol(Y))
+SecAct.inference.gsl.legacy <- function(Y, SigMat = "SecAct",
+                                       lambda = 5e+05, nrand = 1000) {
+  X <- .load_signature(SigMat)
+  prep <- .prepare_matrices(X, Y)
+
+  X <- prep$X
+  Y <- prep$Y
+
+  n <- as.integer(nrow(X))
+  p <- as.integer(ncol(X))
+  m <- as.integer(ncol(Y))
   len <- p * m
-  res <- .C("ridgeReg", as.double(X), as.double(Y), n, p, m, as.double(lambda), as.double(nrand),
-            beta = double(len), se = double(len), zscore = double(len), pvalue = double(len),
-            PACKAGE = "RidgeR")
-  formatter <- function(v) matrix(v, nrow=p, ncol=m, dimnames=list(colnames(X), colnames(Y)))
-  list(beta = formatter(res$beta), se = formatter(res$se), zscore = formatter(res$zscore), pvalue = formatter(res$pvalue))
+
+  res <- .C(
+    "ridgeReg",
+    as.double(X),
+    as.double(Y),
+    n,
+    p,
+    m,
+    as.double(lambda),
+    as.double(nrand),
+    beta   = double(len),
+    se     = double(len),
+    zscore = double(len),
+    pvalue = double(len),
+    PACKAGE = "RidgeR"
+  )
+
+  list(
+    beta   = .format_result(res$beta,   X, Y),
+    se     = .format_result(res$se,     X, Y),
+    zscore = .format_result(res$zscore, X, Y),
+    pvalue = .format_result(res$pvalue, X, Y)
+  )
 }
 
 #' @title Secreted protein activity inference (Legacy Version)
@@ -35,18 +99,26 @@ SecAct.inference.gsl.legacy <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=
 #' @param nrand Number of randomizations (default: 1000).
 #' @return List with beta, se, zscore, pvalue matrices (proteins x samples).
 #' @export
-SecAct.inference.gsl.old <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=1000)
-{
-  if(SigMat=="SecAct") {
-    Xfile <- file.path(system.file(package = "RidgeR"), "extdata/SecAct.tsv.gz")
-    X <- read.table(Xfile, sep="\t", check.names=FALSE)
-  } else { X <- read.table(SigMat, sep="\t", check.names=FALSE) }
-  olp <- intersect(row.names(Y), row.names(X))
-  X <- scale(as.matrix(X[olp,,drop=F])); Y <- scale(as.matrix(Y[olp,,drop=F]))
-  X[is.na(X)] <- 0; Y[is.na(Y)] <- 0
-  res <- .Call("ridgeReg_old_interface", X, Y, as.numeric(lambda), as.integer(nrand), PACKAGE="RidgeR")
-  formatter <- function(v) matrix(v, nrow=ncol(X), ncol=ncol(Y), dimnames=list(colnames(X), colnames(Y)))
-  list(beta=formatter(res$beta), se=formatter(res$se), zscore=formatter(res$zscore), pvalue=formatter(res$pvalue))
+SecAct.inference.gsl.old <- function(Y, SigMat = "SecAct",
+                                   lambda = 5e+05, nrand = 1000) {
+  X <- .load_signature(SigMat)
+  prep <- .prepare_matrices(X, Y)
+
+  res <- .Call(
+    "ridgeReg_old_interface",
+    prep$X,
+    prep$Y,
+    as.numeric(lambda),
+    as.integer(nrand),
+    PACKAGE = "RidgeR"
+  )
+
+  list(
+    beta   = .format_result(res$beta,   prep$X, prep$Y),
+    se     = .format_result(res$se,     prep$X, prep$Y),
+    zscore = .format_result(res$zscore, prep$X, prep$Y),
+    pvalue = .format_result(res$pvalue, prep$X, prep$Y)
+  )
 }
 
 #' @title Secreted protein activity inference (Legacy Version - T Permutation)
@@ -57,18 +129,26 @@ SecAct.inference.gsl.old <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=100
 #' @param nrand Number of randomizations (default: 1000).
 #' @return List with beta, se, zscore, pvalue matrices (proteins x samples).
 #' @export
-SecAct.inference.gsl.old2 <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=1000)
-{
-  if(SigMat=="SecAct") {
-    Xfile <- file.path(system.file(package = "RidgeR"), "extdata/SecAct.tsv.gz")
-    X <- read.table(Xfile, sep="\t", check.names=FALSE)
-  } else { X <- read.table(SigMat, sep="\t", check.names=FALSE) }
-  olp <- intersect(row.names(Y), row.names(X))
-  X <- scale(as.matrix(X[olp,,drop=F])); Y <- scale(as.matrix(Y[olp,,drop=F]))
-  X[is.na(X)] <- 0; Y[is.na(Y)] <- 0
-  res <- .Call("ridgeRegTperm_old_interface", X, Y, as.numeric(lambda), as.integer(nrand), PACKAGE = "RidgeR")
-  formatter <- function(v) matrix(v, nrow=ncol(X), ncol=ncol(Y), dimnames=list(colnames(X), colnames(Y)))
-  list(beta=formatter(res$beta), se=formatter(res$se), zscore=formatter(res$zscore), pvalue=formatter(res$pvalue))
+SecAct.inference.gsl.old2 <- function(Y, SigMat = "SecAct",
+                                    lambda = 5e+05, nrand = 1000) {
+  X <- .load_signature(SigMat)
+  prep <- .prepare_matrices(X, Y)
+
+  res <- .Call(
+    "ridgeRegTperm_old_interface",
+    prep$X,
+    prep$Y,
+    as.numeric(lambda),
+    as.integer(nrand),
+    PACKAGE = "RidgeR"
+  )
+
+  list(
+    beta   = .format_result(res$beta,   prep$X, prep$Y),
+    se     = .format_result(res$se,     prep$X, prep$Y),
+    zscore = .format_result(res$zscore, prep$X, prep$Y),
+    pvalue = .format_result(res$pvalue, prep$X, prep$Y)
+  )
 }
 
 #' @title Secreted protein activity inference (Optimized Version - Y Permutation)
@@ -80,19 +160,29 @@ SecAct.inference.gsl.old2 <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=10
 #' @param ncores Number of cores (default: all available minus 1).
 #' @return List with beta, se, zscore, pvalue matrices (proteins x samples).
 #' @export
-SecAct.inference.gsl.new <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=1000, ncores=NULL)
-{
-  if(SigMat=="SecAct") {
-    Xfile <- file.path(system.file(package = "RidgeR"), "extdata/SecAct.tsv.gz")
-    X <- read.table(Xfile, sep="\t", check.names=FALSE)
-  } else { X <- read.table(SigMat, sep="\t", check.names=FALSE) }
-  olp <- intersect(row.names(Y), row.names(X))
-  X <- scale(as.matrix(X[olp,,drop=F])); Y <- scale(as.matrix(Y[olp,,drop=F]))
-  X[is.na(X)] <- 0; Y[is.na(Y)] <- 0
-  if(is.null(ncores)) ncores <- max(1, parallel::detectCores(logical = FALSE) - 1)
-  res <- .Call("ridgeRegFast_interface", X, Y, as.numeric(lambda), as.integer(nrand), as.integer(ncores), PACKAGE = "RidgeR")
-  formatter <- function(v) matrix(v, nrow=ncol(X), ncol=ncol(Y), dimnames=list(colnames(X), colnames(Y)))
-  list(beta=formatter(res$beta), se=formatter(res$se), zscore=formatter(res$zscore), pvalue=formatter(res$pvalue))
+SecAct.inference.gsl.new <- function(Y, SigMat = "SecAct",
+                                   lambda = 5e+05, nrand = 1000,
+                                   ncores = NULL) {
+  X <- .load_signature(SigMat)
+  prep <- .prepare_matrices(X, Y)
+  ncores <- .default_ncores(ncores)
+
+  res <- .Call(
+    "ridgeRegFast_interface",
+    prep$X,
+    prep$Y,
+    as.numeric(lambda),
+    as.integer(nrand),
+    as.integer(ncores),
+    PACKAGE = "RidgeR"
+  )
+
+  list(
+    beta   = .format_result(res$beta,   prep$X, prep$Y),
+    se     = .format_result(res$se,     prep$X, prep$Y),
+    zscore = .format_result(res$zscore, prep$X, prep$Y),
+    pvalue = .format_result(res$pvalue, prep$X, prep$Y)
+  )
 }
 
 #' @title Secreted protein activity inference (T Column Permutation Version)
@@ -104,19 +194,29 @@ SecAct.inference.gsl.new <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=100
 #' @param ncores Number of cores (default: all available minus 1).
 #' @return List with beta, se, zscore, pvalue matrices (proteins x samples).
 #' @export
-SecAct.inference.gsl.new2 <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=1000, ncores=NULL)
-{
-  if(SigMat=="SecAct") {
-    Xfile <- file.path(system.file(package = "RidgeR"), "extdata/SecAct.tsv.gz")
-    X <- read.table(Xfile, sep="\t", check.names=FALSE)
-  } else { X <- read.table(SigMat, sep="\t", check.names=FALSE) }
-  olp <- intersect(row.names(Y), row.names(X))
-  X <- scale(as.matrix(X[olp,,drop=F])); Y <- scale(as.matrix(Y[olp,,drop=F]))
-  X[is.na(X)] <- 0; Y[is.na(Y)] <- 0
-  if(is.null(ncores)) ncores <- max(1, parallel::detectCores(logical = FALSE) - 1)
-  res <- .Call("ridgeRegTperm_interface", X, Y, as.numeric(lambda), as.integer(nrand), as.integer(ncores), PACKAGE = "RidgeR")
-  formatter <- function(v) matrix(v, nrow=ncol(X), ncol=ncol(Y), dimnames=list(colnames(X), colnames(Y)))
-  list(beta=formatter(res$beta), se=formatter(res$se), zscore=formatter(res$zscore), pvalue=formatter(res$pvalue))
+SecAct.inference.gsl.new2 <- function(Y, SigMat = "SecAct",
+                                    lambda = 5e+05, nrand = 1000,
+                                    ncores = NULL) {
+  X <- .load_signature(SigMat)
+  prep <- .prepare_matrices(X, Y)
+  ncores <- .default_ncores(ncores)
+
+  res <- .Call(
+    "ridgeRegTperm_interface",
+    prep$X,
+    prep$Y,
+    as.numeric(lambda),
+    as.integer(nrand),
+    as.integer(ncores),
+    PACKAGE = "RidgeR"
+  )
+
+  list(
+    beta   = .format_result(res$beta,   prep$X, prep$Y),
+    se     = .format_result(res$se,     prep$X, prep$Y),
+    zscore = .format_result(res$zscore, prep$X, prep$Y),
+    pvalue = .format_result(res$pvalue, prep$X, prep$Y)
+  )
 }
 
 #' @title Compare all five implementations
@@ -129,25 +229,47 @@ SecAct.inference.gsl.new2 <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=10
 #' @param tol Tolerance for numerical comparison (default: 1e-10).
 #' @return List with results from all methods and comparison statistics.
 #' @export
-SecAct.compare.methods <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=100, ncores=NULL, tol=1e-10) {
+SecAct.compare.methods <- function(Y, SigMat = "SecAct",
+                                   lambda = 5e+05, nrand = 100,
+                                   ncores = NULL, tol = 1e-10) {
+
+  time_it <- function(expr) system.time(expr)["elapsed"]
+
   cat("Running gsl.legacy (.C legacy)...\n")
-  t0 <- system.time({ res_leg <- SecAct.inference.gsl.legacy(Y, SigMat, lambda, nrand) })
+  t0 <- time_it(res_leg  <- SecAct.inference.gsl.legacy(Y, SigMat, lambda, nrand))
+
   cat("Running gsl.old (single-threaded, Y row permutation)...\n")
-  t1 <- system.time({ res_old <- SecAct.inference.gsl.old(Y, SigMat, lambda, nrand) })
+  t1 <- time_it(res_old  <- SecAct.inference.gsl.old(Y, SigMat, lambda, nrand))
+
   cat("Running gsl.old2 (single-threaded, T column permutation)...\n")
-  t2 <- system.time({ res_old2 <- SecAct.inference.gsl.old2(Y, SigMat, lambda, nrand) })
+  t2 <- time_it(res_old2 <- SecAct.inference.gsl.old2(Y, SigMat, lambda, nrand))
+
   cat("Running gsl.new (multi-threaded, Y row permutation)...\n")
-  t3 <- system.time({ res_new <- SecAct.inference.gsl.new(Y, SigMat, lambda, nrand, ncores) })
+  t3 <- time_it(res_new  <- SecAct.inference.gsl.new(Y, SigMat, lambda, nrand, ncores))
+
   cat("Running gsl.new2 (multi-threaded, T column permutation)...\n")
-  t4 <- system.time({ res_new2 <- SecAct.inference.gsl.new2(Y, SigMat, lambda, nrand, ncores) })
-  compare_matrices <- function(m1, m2) max(abs(m1 - m2), na.rm=TRUE) < tol
+  t4 <- time_it(res_new2 <- SecAct.inference.gsl.new2(Y, SigMat, lambda, nrand, ncores))
+
+  equal <- function(a, b) max(abs(a - b), na.rm = TRUE) < tol
+
   cat("\n=== Consistency Check (z-score) ===\n")
-  cat(sprintf("legacy vs old  : %s\n", compare_matrices(res_leg$zscore, res_old$zscore)))
-  cat(sprintf("old    vs new  : %s\n", compare_matrices(res_old$zscore, res_new$zscore)))
-  cat(sprintf("old2   vs new2 : %s\n", compare_matrices(res_old2$zscore, res_new2$zscore)))
-  cat(sprintf("new    vs new2 : %s\n", compare_matrices(res_new$zscore, res_new2$zscore)))
+  cat(sprintf("legacy vs old  : %s\n", equal(res_leg$zscore,  res_old$zscore)))
+  cat(sprintf("old    vs new  : %s\n", equal(res_old$zscore,  res_new$zscore)))
+  cat(sprintf("old2   vs new2 : %s\n", equal(res_old2$zscore, res_new2$zscore)))
+  cat(sprintf("new    vs new2 : %s\n", equal(res_new$zscore,  res_new2$zscore)))
+
   cat("\n=== Timing Summary ===\n")
-  cat(sprintf("  gsl.legacy : %.2fs\n", t0["elapsed"])); cat(sprintf("  gsl.old    : %.2fs\n", t1["elapsed"]))
-  cat(sprintf("  gsl.old2   : %.2fs\n", t2["elapsed"])); cat(sprintf("  gsl.new    : %.2fs\n", t3["elapsed"]))
-  cat(sprintf("  gsl.new2   : %.2fs\n", t4["elapsed"])); invisible(list(legacy=res_leg, old=res_old, old2=res_old2, new=res_new, new2=res_new2))
+  cat(sprintf("  gsl.legacy : %.2fs\n", t0))
+  cat(sprintf("  gsl.old    : %.2fs\n", t1))
+  cat(sprintf("  gsl.old2   : %.2fs\n", t2))
+  cat(sprintf("  gsl.new    : %.2fs\n", t3))
+  cat(sprintf("  gsl.new2   : %.2fs\n", t4))
+
+  invisible(list(
+    legacy = res_leg,
+    old    = res_old,
+    old2   = res_old2,
+    new    = res_new,
+    new2   = res_new2
+  ))
 }
