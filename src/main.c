@@ -20,8 +20,6 @@
    HELPER FUNCTIONS
    ========================================================= */
 
-// Maps R's Column-Major memory to GSL's Row-Major structure.
-// If R matrix is (N x P), this creates a GSL matrix of (P x N).
 gsl_matrix *RVectorObject_to_gsl_matrix(double *vec, size_t nr, size_t nc)
 {
   gsl_block *b = (gsl_block*)malloc(sizeof(gsl_block));
@@ -91,7 +89,8 @@ void ridgeReg_old_core(
     shuffle(array_index, (int)n);
     for(size_t j=0; j<n; j++){
       gsl_vector_const_view t_col = gsl_matrix_const_column(Yt, (size_t)array_index[j]);
-      gsl_matrix_set_column(Y_rand_t, j, &t_col.vector);
+      // FIXED: Use gsl_matrix_set_col instead of gsl_matrix_set_column
+      gsl_matrix_set_col(Y_rand_t, j, &t_col.vector);
     }
     gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, Y_rand_t, 0.0, beta_rand);
 
@@ -317,7 +316,11 @@ void ridgeRegTperm_core(
   int nths = 1;
   #ifdef _OPENMP
     #pragma omp parallel
-    { #pragma omp single nths = omp_get_num_threads(); }
+    { 
+       // FIXED: Multiline pragma to satisfy Clang expression parser
+       #pragma omp single
+       nths = omp_get_num_threads(); 
+    }
   #endif
 
   double *tsum = (double*)calloc(nths * total_elements, sizeof(double));
