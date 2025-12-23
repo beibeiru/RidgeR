@@ -129,6 +129,62 @@ static int* generate_permutation_table(int n, int nrand, unsigned long seed) {
     return table;
 }
 
+/* Debug function to print GSL RNG values for Python comparison */
+SEXP debug_gsl_rng(void) {
+    gsl_rng *rng = gsl_rng_alloc(gsl_rng_mt19937);
+    gsl_rng_set(rng, 0);
+    
+    /* [1] Raw MT19937 values */
+    Rprintf("[1] First 10 raw MT19937 values (seed=0):\n");
+    for (int i = 0; i < 10; i++) {
+        Rprintf("    %d: %lu\n", i, gsl_rng_get(rng));
+    }
+    
+    /* [2] uniform_int(10) */
+    gsl_rng_set(rng, 0);
+    Rprintf("\n[2] uniform_int(10), first 10 values:\n    ");
+    for (int i = 0; i < 10; i++) {
+        Rprintf("%lu ", gsl_rng_uniform_int(rng, 10));
+    }
+    Rprintf("\n");
+    
+    /* [3] Shuffle [0..9] */
+    gsl_rng_set(rng, 0);
+    int arr[10] = {0,1,2,3,4,5,6,7,8,9};
+    Rprintf("\n[3] Fisher-Yates shuffle of [0..9] (seed=0):\n");
+    Rprintf("    Before: ");
+    for (int i = 0; i < 10; i++) Rprintf("%d ", arr[i]);
+    Rprintf("\n");
+    
+    for (int i = 0; i < 9; i++) {
+        int j = i + (int)gsl_rng_uniform_int(rng, (unsigned long)(10 - i));
+        int tmp = arr[j];
+        arr[j] = arr[i];
+        arr[i] = tmp;
+    }
+    Rprintf("    After:  ");
+    for (int i = 0; i < 10; i++) Rprintf("%d ", arr[i]);
+    Rprintf("\n");
+    
+    /* [4] Cumulative shuffles */
+    gsl_rng_set(rng, 0);
+    int arr2[10] = {0,1,2,3,4,5,6,7,8,9};
+    Rprintf("\n[4] Cumulative shuffles of [0..9], 5 permutations (seed=0):\n");
+    for (int perm = 0; perm < 5; perm++) {
+        for (int i = 0; i < 9; i++) {
+            int j = i + (int)gsl_rng_uniform_int(rng, (unsigned long)(10 - i));
+            int tmp = arr2[j];
+            arr2[j] = arr2[i];
+            arr2[i] = tmp;
+        }
+        Rprintf("    Perm %d: ", perm);
+        for (int i = 0; i < 10; i++) Rprintf("%d ", arr2[i]);
+        Rprintf("\n");
+    }
+    
+    gsl_rng_free(rng);
+    return R_NilValue;
+}
 
 /* =============================================================================
  * SECTION 2: GSL MATRIX HELPERS
@@ -965,6 +1021,9 @@ SEXP ridgeReg_mttp_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp,
  * =============================================================================
  */
 
+/* Add the debug function declaration at the top of the file or in a header */
+SEXP debug_gsl_rng(void);
+
 static const R_CMethodDef cMethods[] = {
     {"ridgeReg", (DL_FUNC) &ridgeReg, 11},
     {NULL, NULL, 0}
@@ -972,9 +1031,10 @@ static const R_CMethodDef cMethods[] = {
 
 static const R_CallMethodDef callMethods[] = {
     {"ridgeReg_styp_interface",      (DL_FUNC) &ridgeReg_styp_interface,      4},
-    {"ridgeReg_sttp_interface", (DL_FUNC) &ridgeReg_sttp_interface, 4},
+    {"ridgeReg_sttp_interface",      (DL_FUNC) &ridgeReg_sttp_interface,      4},
     {"ridgeReg_mtyp_interface",      (DL_FUNC) &ridgeReg_mtyp_interface,      5},
-    {"ridgeReg_mttp_interface",     (DL_FUNC) &ridgeReg_mttp_interface,     5},
+    {"ridgeReg_mttp_interface",      (DL_FUNC) &ridgeReg_mttp_interface,      5},
+    {"debug_gsl_rng",                (DL_FUNC) &debug_gsl_rng,                0},  /* ADD THIS */
     {NULL, NULL, 0}
 };
 
