@@ -13,4 +13,6 @@ export(SecAct.inference.gsl.mtyp)
 export(SecAct.inference.gsl.sttp)
 export(SecAct.inference.gsl.styp)
 export(SecAct.inference.gsl.legacy)
+
+export(debug_gsl_rng)
 useDynLib(RidgeR, .registration = TRUE)
