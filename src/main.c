@@ -52,6 +52,7 @@
 /**
  * Fisher-Yates shuffle using native rand() - matches original SecAct
  */
+/*
 static void shuffle_array_native(int *array, int n) {
     for (int i = 0; i < n - 1; i++) {
         int j = i + rand() / (RAND_MAX / (n - i) + 1);
@@ -60,6 +61,7 @@ static void shuffle_array_native(int *array, int n) {
         array[i] = tmp;
     }
 }
+*/
 
 /**
  * Fisher-Yates shuffle using GSL RNG - cross-platform reproducible
