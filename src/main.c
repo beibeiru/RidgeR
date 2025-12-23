@@ -77,19 +77,21 @@ static void shuffle_array_gsl(gsl_rng *rng, int *array, int n) {
 /**
  * Generate permutation table using native rand() - for SecAct compatibility
  */
+
+/*
 static int* generate_permutation_table_native(int n, int nrand) {
     size_t table_size = (size_t)nrand * (size_t)n;
     int *table = (int*)malloc(table_size * sizeof(int));
     int *array = (int*)malloc((size_t)n * sizeof(int));
 
-    /* Same seed as original SecAct */
+    // Same seed as original SecAct 
     srand(0);
 
     for (int i = 0; i < n; i++) {
         array[i] = i;
     }
 
-    /* Cumulative shuffle - matches original SecAct behavior */
+    // Cumulative shuffle - matches original SecAct behavior
     for (int perm = 0; perm < nrand; perm++) {
         shuffle_array_native(array, n);
         memcpy(table + ((size_t)perm * n), array, n * sizeof(int));
@@ -98,7 +100,7 @@ static int* generate_permutation_table_native(int n, int nrand) {
     free(array);
     return table;
 }
-
+*/
 
 /**
  * Generate permutation table using GSL RNG - for cross-platform reproducibility
@@ -219,20 +221,21 @@ static SEXP create_result_list(SEXP beta, SEXP se, SEXP zscore, SEXP pvalue) {
  * @param I_out   Output: p x p identity matrix (modified in place)
  * @param T_out   Output: Projection matrix T (p x n)
  */
+/*
 static void compute_projection_matrix(const gsl_matrix *Xt, double lambda,
                                        gsl_matrix *I_out, gsl_matrix *T_out) {
-    /* I = λI + X'X */
+    // I = λI + X'X 
     gsl_matrix_set_identity(I_out);
     gsl_blas_dsyrk(CblasLower, CblasNoTrans, 1.0, Xt, lambda, I_out);
 
-    /* I = (X'X + λI)^{-1} via Cholesky decomposition */
+    // I = (X'X + λI)^{-1} via Cholesky decomposition 
     gsl_linalg_cholesky_decomp(I_out);
     gsl_linalg_cholesky_invert(I_out);
 
-    /* T = (X'X + λI)^{-1} X' */
+    // T = (X'X + λI)^{-1} X' 
     gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, I_out, Xt, 0.0, T_out);
 }
-
+*/
 
 /**
  * Finalize permutation statistics
@@ -246,6 +249,7 @@ static void compute_projection_matrix(const gsl_matrix *Xt, double lambda,
  * @param len     Number of elements
  * @param nrand   Number of permutations
  */
+/*
 static void finalize_permutation_stats(const double *bv, double *sv, double *zv,
                                         double *pv, R_xlen_t len, int nrand) {
     double inv_nrand = 1.0 / nrand;
@@ -260,7 +264,7 @@ static void finalize_permutation_stats(const double *bv, double *sv, double *zv,
         pv[i] = (pv[i] + 1.0) / (nrand + 1.0);
     }
 }
-
+*/
 
 /* =============================================================================
  * SECTION 4: LEGACY - .C INTERFACE (Y-PERMUTATION)
