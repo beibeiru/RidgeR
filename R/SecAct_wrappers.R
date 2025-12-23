@@ -1533,28 +1533,3 @@ SecAct.activity.inference.scRNAseq <- function(
         return(res)
     }
 }
-
-# ==============================================================================
-# SECTION 10: DEBUG UTILITIES
-# ==============================================================================
-
-#' Debug GSL RNG Output
-#'
-#' Prints GSL MT19937 random number generator values for comparison
-#' with Python implementation.
-#'
-#' @return NULL (invisibly). Prints debug output to console.
-#'
-#' @examples
-#' \dontrun{
-#' # Compare with Python output
-#' debug_gsl_rng()
-#' 
-#' # Python equivalent:
-#' # python tests/test_gsl_debug.py
-#' }
-#'
-#' @export
-debug_gsl_rng <- function() {
-    invisible(.Call("debug_gsl_rng", PACKAGE = "RidgeR"))
-}
