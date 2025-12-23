@@ -1034,7 +1034,7 @@ static const R_CallMethodDef callMethods[] = {
     {"ridgeReg_sttp_interface",      (DL_FUNC) &ridgeReg_sttp_interface,      4},
     {"ridgeReg_mtyp_interface",      (DL_FUNC) &ridgeReg_mtyp_interface,      5},
     {"ridgeReg_mttp_interface",      (DL_FUNC) &ridgeReg_mttp_interface,      5},
-    {"debug_gsl_rng",                (DL_FUNC) &debug_gsl_rng,                0},  /* ADD THIS */
+    {"debug_gsl_rng",                (DL_FUNC) &debug_gsl_rng,                0},
     {NULL, NULL, 0}
 };
 
