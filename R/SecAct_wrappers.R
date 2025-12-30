@@ -1551,3 +1551,419 @@ SecAct.activity.inference.scRNAseq <- function(
         return(res)
     }
 }
+
+# ==============================================================================
+# SECTION 10: H5ad Output Utility
+# ==============================================================================
+
+#' Save SecAct Results to H5AD Format
+#'
+#' Exports SecAct results (beta, se, zscore, pvalue) from SpaCET or Seurat
+#' objects to H5AD format for interoperability with Python/scanpy.
+#'
+#' @param obj A SpaCET or Seurat object containing SecAct results.
+#' @param output_file Character string. Output file path (default: "SecAct_results.h5ad").
+#' @param verbose Logical. Print progress messages (default: TRUE).
+#'
+#' @return Invisibly returns the output file path.
+#'
+#' @details
+#' The function creates an anndata-compatible H5AD file with:
+#' \itemize{
+#'   \item \code{X}: Beta coefficients matrix (cells × proteins)
+#'   \item \code{obsm/se}: Standard errors
+#'   \item \code{obsm/zscore}: Z-scores
+#'   \item \code{obsm/pvalue}: P-values
+#'   \item \code{obs/_index}: Cell/spot names
+#'   \item \code{var/_index}: Protein names
+#'   \item \code{uns/protein_names}: Protein names
+#'   \item \code{uns/source}: Source object type
+#' }
+#'
+#' @section Python Usage:
+#' \preformatted{
+#' import anndata
+#' adata = anndata.read_h5ad("SecAct_results.h5ad")
+#' beta   = adata.X                  # cells × proteins
+#' se     = adata.obsm['se']
+#' zscore = adata.obsm['zscore']
+#' pvalue = adata.obsm['pvalue']
+#' protein_names = list(adata.var_names)
+#' cell_names = list(adata.obs_names)
+#' }
+#'
+#' @examples
+#' \dontrun{
+#' # From SpaCET object
+#' save_secact_to_h5ad(SpaCET_obj, "spacet_results.h5ad")
+#'
+#' # From Seurat object
+#' save_secact_to_h5ad(seurat_obj, "seurat_results.h5ad")
+#' }
+#'
+#' @importFrom rhdf5 h5createFile h5createGroup h5createDataset h5write
+#' @importFrom rhdf5 h5writeAttribute h5closeAll H5Fopen H5Fclose H5Gopen H5Gclose
+#' @export
+save_secact_to_h5ad <- function(obj, output_file = "SecAct_results.h5ad", verbose = TRUE) {
+
+  # Check rhdf5 is available
+
+if (!requireNamespace("rhdf5", quietly = TRUE)) {
+    stop("Package 'rhdf5' is required. Install with: BiocManager::install('rhdf5')")
+  }
+
+  if (verbose) {
+    cat("Saving SecAct results to H5AD\n")
+    cat("Output:", output_file, "\n\n")
+  }
+
+  ## ------------------------------------------------------------------
+  ## 1. Detect object type & extract SecAct results
+  ## ------------------------------------------------------------------
+  if (inherits(obj, "SpaCET")) {
+    if (verbose) cat("Detected SpaCET object\n")
+
+    if (is.null(obj@results$SecAct_output$SecretedProteinActivity)) {
+      stop("No SecAct results found in SpaCET object. Run SecAct inference first.")
+    }
+    res <- obj@results$SecAct_output$SecretedProteinActivity
+    cell_names <- colnames(res$beta)
+
+  } else if (inherits(obj, "Seurat")) {
+    if (verbose) cat("Detected Seurat object\n")
+
+    if (is.null(obj@misc$SecAct_output$SecretedProteinActivity)) {
+      stop("No SecAct results found in Seurat object. Run SecAct inference first.")
+    }
+    res <- obj@misc$SecAct_output$SecretedProteinActivity
+    cell_names <- colnames(obj)
+
+  } else {
+    stop("Unsupported object type. Must be SpaCET or Seurat.")
+  }
+
+  ## ------------------------------------------------------------------
+  ## 2. Extract matrices
+  ## ------------------------------------------------------------------
+  beta   <- as.matrix(res$beta)
+  se     <- as.matrix(res$se)
+  zscore <- as.matrix(res$zscore)
+  pvalue <- as.matrix(res$pvalue)
+
+  # Validate dimensions
+  stopifnot(
+    "Dimension mismatch between beta and se" = identical(dim(beta), dim(se)),
+    "Dimension mismatch between beta and zscore" = identical(dim(beta), dim(zscore)),
+    "Dimension mismatch between beta and pvalue" = identical(dim(beta), dim(pvalue))
+  )
+
+  protein_names <- rownames(beta)
+  n_cells       <- length(cell_names)
+  n_proteins    <- length(protein_names)
+
+  if (verbose) {
+    cat("Cells   :", n_cells, "\n")
+    cat("Proteins:", n_proteins, "\n\n")
+  }
+
+  ## ------------------------------------------------------------------
+  ## 3. Create H5AD file
+  ## ------------------------------------------------------------------
+  # Clean up any open handles and remove existing file
+  rhdf5::h5closeAll()
+  if (file.exists(output_file)) file.remove(output_file)
+
+  # Create file and groups
+  rhdf5::h5createFile(output_file)
+  rhdf5::h5createGroup(output_file, "obs")
+  rhdf5::h5createGroup(output_file, "var")
+  rhdf5::h5createGroup(output_file, "obsm")
+  rhdf5::h5createGroup(output_file, "uns")
+  rhdf5::h5closeAll()
+
+  ## ------------------------------------------------------------------
+  ## 4. Helper: write matrix with chunking (proteins × cells → cells × proteins)
+  ## ------------------------------------------------------------------
+  write_matrix <- function(mat, dataset_name) {
+    mat_t <- t(mat)  # Transpose: proteins × cells → cells × proteins
+    dims  <- dim(mat_t)
+
+    # Determine chunk size
+    chunk_rows <- min(1000L, dims[1])
+    chunk_cols <- dims[2]
+
+    rhdf5::h5createDataset(
+      file    = output_file,
+      dataset = dataset_name,
+      dims    = dims,
+      chunk   = c(chunk_rows, chunk_cols),
+      level   = 4  # gzip compression level
+    )
+    rhdf5::h5write(mat_t, output_file, dataset_name)
+    rhdf5::h5closeAll()
+  }
+
+  ## ------------------------------------------------------------------
+  ## 5. Write matrices
+  ## ------------------------------------------------------------------
+  if (verbose) cat("Writing X (beta)...\n")
+  write_matrix(beta, "X")
+
+  if (verbose) cat("Writing obsm/se...\n")
+  write_matrix(se, "obsm/se")
+
+  if (verbose) cat("Writing obsm/zscore...\n")
+  write_matrix(zscore, "obsm/zscore")
+
+  if (verbose) cat("Writing obsm/pvalue...\n")
+  write_matrix(pvalue, "obsm/pvalue")
+
+  ## ------------------------------------------------------------------
+  ## 6. Write indices
+  ## ------------------------------------------------------------------
+  if (verbose) cat("Writing obs/_index...\n")
+  rhdf5::h5write(cell_names, output_file, "obs/_index")
+  rhdf5::h5closeAll()
+
+  if (verbose) cat("Writing var/_index...\n")
+  rhdf5::h5write(protein_names, output_file, "var/_index")
+  rhdf5::h5closeAll()
+
+  ## ------------------------------------------------------------------
+  ## 7. Write uns metadata
+  ## ------------------------------------------------------------------
+  if (verbose) cat("Writing uns metadata...\n")
+  rhdf5::h5write(protein_names, output_file, "uns/protein_names")
+  rhdf5::h5closeAll()
+
+  source_type <- if (inherits(obj, "SpaCET")) "SpaCET / SecAct" else "Seurat / SecAct"
+  rhdf5::h5write(source_type, output_file, "uns/source")
+  rhdf5::h5closeAll()
+
+  ## ------------------------------------------------------------------
+  ## 8. Add anndata compatibility attributes
+  ## ------------------------------------------------------------------
+  if (verbose) cat("Adding anndata attributes...\n")
+
+  fid <- rhdf5::H5Fopen(output_file)
+
+  # Root attributes
+  rhdf5::h5writeAttribute("0.8.0", fid, "encoding-version")
+  rhdf5::h5writeAttribute("anndata", fid, "encoding-type")
+
+  # obs attributes
+  obs_id <- rhdf5::H5Gopen(fid, "obs")
+  rhdf5::h5writeAttribute("dataframe", obs_id, "encoding-type")
+  rhdf5::h5writeAttribute("0.2.0", obs_id, "encoding-version")
+  rhdf5::h5writeAttribute("_index", obs_id, "_index")
+  rhdf5::h5writeAttribute(character(0), obs_id, "column-order")
+  rhdf5::H5Gclose(obs_id)
+
+  # var attributes
+  var_id <- rhdf5::H5Gopen(fid, "var")
+  rhdf5::h5writeAttribute("dataframe", var_id, "encoding-type")
+  rhdf5::h5writeAttribute("0.2.0", var_id, "encoding-version")
+  rhdf5::h5writeAttribute("_index", var_id, "_index")
+  rhdf5::h5writeAttribute(character(0), var_id, "column-order")
+  rhdf5::H5Gclose(var_id)
+
+  rhdf5::H5Fclose(fid)
+  rhdf5::h5closeAll()
+
+  ## ------------------------------------------------------------------
+  ## 9. Summary
+  ## ------------------------------------------------------------------
+  if (verbose) {
+    cat("\nDONE\n")
+    cat("File size:", sprintf("%.2f MB", file.info(output_file)$size / 1e6), "\n")
+
+    cat("\nPython usage:\n")
+    cat("  import anndata\n")
+    cat("  adata = anndata.read_h5ad('", basename(output_file), "')\n", sep = "")
+    cat("  beta   = adata.X                    # (", n_cells, " x ", n_proteins, ")\n", sep = "")
+    cat("  se     = adata.obsm['se']\n")
+    cat("  zscore = adata.obsm['zscore']\n")
+    cat("  pvalue = adata.obsm['pvalue']\n")
+    cat("  protein_names = list(adata.var_names)\n")
+  }
+
+  invisible(output_file)
+}
+
+
+#' Save Ridge Regression Results to H5AD Format
+#'
+#' Exports ridge regression results (beta, se, zscore, pvalue) from a list
+#' to H5AD format for interoperability with Python/scanpy.
+#'
+#' @param results List containing beta, se, zscore, pvalue matrices.
+#' @param output_file Character string. Output file path (default: "ridge_results.h5ad").
+#' @param feature_names Character vector. Feature/protein names (default: rownames of beta).
+#' @param sample_names Character vector. Sample/cell names (default: colnames of beta).
+#' @param verbose Logical. Print progress messages (default: TRUE).
+#'
+#' @return Invisibly returns the output file path.
+#'
+#' @examples
+#' \dontrun{
+#' results <- ridge(X, Y, n_rand = 1000)
+#' save_ridge_to_h5ad(results, "ridge_results.h5ad")
+#' }
+#'
+#' @importFrom rhdf5 h5createFile h5createGroup h5createDataset h5write
+#' @importFrom rhdf5 h5writeAttribute h5closeAll H5Fopen H5Fclose H5Gopen H5Gclose
+#' @export
+save_ridge_to_h5ad <- function(results,
+                                output_file = "ridge_results.h5ad",
+                                feature_names = NULL,
+                                sample_names = NULL,
+                                verbose = TRUE) {
+
+  # Check rhdf5 is available
+  if (!requireNamespace("rhdf5", quietly = TRUE)) {
+    stop("Package 'rhdf5' is required. Install with: BiocManager::install('rhdf5')")
+  }
+
+  if (verbose) {
+    cat("Saving ridge results to H5AD\n")
+    cat("Output:", output_file, "\n\n")
+  }
+
+  ## ------------------------------------------------------------------
+  ## 1. Extract matrices
+  ## ------------------------------------------------------------------
+  beta   <- as.matrix(results$beta)
+  se     <- as.matrix(results$se)
+  zscore <- as.matrix(results$zscore)
+  pvalue <- as.matrix(results$pvalue)
+
+  n_features <- nrow(beta)
+  n_samples  <- ncol(beta)
+
+  # Handle names
+  if (is.null(feature_names)) {
+    feature_names <- rownames(beta)
+    if (is.null(feature_names)) {
+      feature_names <- paste0("Feature_", seq_len(n_features))
+    }
+  }
+
+  if (is.null(sample_names)) {
+    sample_names <- colnames(beta)
+    if (is.null(sample_names)) {
+      sample_names <- paste0("Sample_", seq_len(n_samples))
+    }
+  }
+
+  if (verbose) {
+    cat("Features:", n_features, "\n")
+    cat("Samples :", n_samples, "\n\n")
+  }
+
+  ## ------------------------------------------------------------------
+  ## 2. Create H5AD file
+  ## ------------------------------------------------------------------
+  rhdf5::h5closeAll()
+  if (file.exists(output_file)) file.remove(output_file)
+
+  rhdf5::h5createFile(output_file)
+  rhdf5::h5createGroup(output_file, "obs")
+  rhdf5::h5createGroup(output_file, "var")
+  rhdf5::h5createGroup(output_file, "obsm")
+  rhdf5::h5createGroup(output_file, "uns")
+  rhdf5::h5closeAll()
+
+  ## ------------------------------------------------------------------
+  ## 3. Write matrices (features × samples → samples × features)
+  ## ------------------------------------------------------------------
+  write_matrix <- function(mat, dataset_name) {
+    mat_t <- t(mat)
+    dims  <- dim(mat_t)
+    chunk_rows <- min(1000L, dims[1])
+    chunk_cols <- dims[2]
+
+    rhdf5::h5createDataset(
+      file    = output_file,
+      dataset = dataset_name,
+      dims    = dims,
+      chunk   = c(chunk_rows, chunk_cols),
+      level   = 4
+    )
+    rhdf5::h5write(mat_t, output_file, dataset_name)
+    rhdf5::h5closeAll()
+  }
+
+  if (verbose) cat("Writing X (beta)...\n")
+  write_matrix(beta, "X")
+
+  if (verbose) cat("Writing obsm/se...\n")
+  write_matrix(se, "obsm/se")
+
+  if (verbose) cat("Writing obsm/zscore...\n")
+  write_matrix(zscore, "obsm/zscore")
+
+  if (verbose) cat("Writing obsm/pvalue...\n")
+  write_matrix(pvalue, "obsm/pvalue")
+
+  ## ------------------------------------------------------------------
+  ## 4. Write indices
+  ## ------------------------------------------------------------------
+  if (verbose) cat("Writing indices...\n")
+  rhdf5::h5write(sample_names, output_file, "obs/_index")
+  rhdf5::h5closeAll()
+
+  rhdf5::h5write(feature_names, output_file, "var/_index")
+  rhdf5::h5closeAll()
+
+  ## ------------------------------------------------------------------
+  ## 5. Write metadata
+  ## ------------------------------------------------------------------
+  rhdf5::h5write(feature_names, output_file, "uns/feature_names")
+  rhdf5::h5write("RidgeR", output_file, "uns/source")
+  rhdf5::h5closeAll()
+
+  ## ------------------------------------------------------------------
+  ## 6. Add anndata compatibility attributes
+  ## ------------------------------------------------------------------
+  if (verbose) cat("Adding anndata attributes...\n")
+
+  fid <- rhdf5::H5Fopen(output_file)
+
+  rhdf5::h5writeAttribute("0.8.0", fid, "encoding-version")
+  rhdf5::h5writeAttribute("anndata", fid, "encoding-type")
+
+  obs_id <- rhdf5::H5Gopen(fid, "obs")
+  rhdf5::h5writeAttribute("dataframe", obs_id, "encoding-type")
+  rhdf5::h5writeAttribute("0.2.0", obs_id, "encoding-version")
+  rhdf5::h5writeAttribute("_index", obs_id, "_index")
+  rhdf5::h5writeAttribute(character(0), obs_id, "column-order")
+  rhdf5::H5Gclose(obs_id)
+
+  var_id <- rhdf5::H5Gopen(fid, "var")
+  rhdf5::h5writeAttribute("dataframe", var_id, "encoding-type")
+  rhdf5::h5writeAttribute("0.2.0", var_id, "encoding-version")
+  rhdf5::h5writeAttribute("_index", var_id, "_index")
+  rhdf5::h5writeAttribute(character(0), var_id, "column-order")
+  rhdf5::H5Gclose(var_id)
+
+  rhdf5::H5Fclose(fid)
+  rhdf5::h5closeAll()
+
+  ## ------------------------------------------------------------------
+  ## 7. Summary
+  ## ------------------------------------------------------------------
+  if (verbose) {
+    cat("\nDONE\n")
+    cat("File size:", sprintf("%.2f MB", file.info(output_file)$size / 1e6), "\n")
+
+    cat("\nPython usage:\n")
+    cat("  import anndata\n")
+    cat("  adata = anndata.read_h5ad('", basename(output_file), "')\n", sep = "")
+    cat("  beta   = adata.X                    # (", n_samples, " x ", n_features, ")\n", sep = "")
+    cat("  se     = adata.obsm['se']\n")
+    cat("  zscore = adata.obsm['zscore']\n")
+    cat("  pvalue = adata.obsm['pvalue']\n")
+  }
+
+  invisible(output_file)
+}
