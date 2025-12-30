@@ -126,14 +126,20 @@ NULL
 #'
 #' @param X Signature matrix (genes x proteins)
 #' @param Y Expression matrix (genes x samples)
+#' @param sort_genes Logical; if TRUE, sort common genes alphabetically
 #' @return List with aligned and scaled X and Y matrices
 #' @keywords internal
-.prepare_matrices <- function(X, Y) {
+.prepare_matrices <- function(X, Y, sort_genes = FALSE) {
     # Find overlapping genes
     common_genes <- intersect(rownames(Y), rownames(X))
 
     if (length(common_genes) == 0) {
         stop("No common genes found between signature and expression matrices")
+    }
+
+    # Optionally sort genes alphabetically
+    if (sort_genes) {
+        common_genes <- sort(common_genes)
     }
 
     # Subset and scale
@@ -438,6 +444,8 @@ SecAct.inference.gsl.mttp <- function(Y,
 #' @param is.group.sig Logical indicating whether to group similar signatures
 #'   (default: FALSE for this low-level function).
 #' @param is.group.cor Correlation cutoff for signature grouping (default: 0.9).
+#' @param sort_genes Logical; if TRUE, sort common genes alphabetically for
+#'   reproducible ordering across different platforms (default: FALSE).
 #'
 #' @return Named list with beta, se, zscore, pvalue matrices (proteins x samples)
 #'
@@ -471,7 +479,8 @@ SecAct.inference.r <- function(Y,
                                 lambda = 5e+05,
                                 nrand = 1000,
                                 is.group.sig = FALSE,
-                                is.group.cor = 0.9) {
+                                is.group.cor = 0.9,
+                                sort_genes = FALSE) {
     # Load signature matrix
     X <- .load_signature(SigMat)
     
@@ -484,6 +493,11 @@ SecAct.inference.r <- function(Y,
     olp <- intersect(rownames(Y), rownames(X))
     if (length(olp) < 2) {
         stop("Too few overlapping genes between expression and signature matrices!")
+    }
+
+    # Optionally sort genes alphabetically
+    if (sort_genes) {
+        olp <- sort(olp)
     }
 
     # Subset and scale
@@ -567,7 +581,7 @@ SecAct.inference.r <- function(Y,
 
 
 # ==============================================================================
-# SECTION 5: TESTING & COMPARISON UTILITIES
+# SECTION 6: MAIN INFERENCE FUNCTION
 # ==============================================================================
 
 #' Secreted Protein Activity Inference (Full Pipeline)
@@ -589,10 +603,14 @@ SecAct.inference.r <- function(Y,
 #' @param ncores Number of CPU cores for parallel versions (default: auto)
 #' @param method Which implementation to use: "legacy", "styp", "sttp", "mtyp", "mttp", "r".
 #'   The "r" method uses pure R (no GSL required).
+#' @param sort_genes Logical; if TRUE, sort common genes alphabetically before
+#'   running ridge regression. This ensures reproducible results across different
+#'   platforms but may differ from original gene order (default: FALSE).
 #' @param verbose If TRUE, print progress messages
 #'
 #' @return Named list with beta, se, zscore, pvalue matrices (proteins x samples)
-
+#'
+#' @export
 SecAct.activity.inference <- function(
     inputProfile,
     inputProfile_control = NULL,
@@ -607,6 +625,7 @@ SecAct.activity.inference <- function(
     sigFilter = FALSE,
     ncores = NULL,
     method = "sttp",
+    sort_genes = FALSE,
     verbose = TRUE
 ) {
     if (verbose) {
@@ -663,6 +682,12 @@ SecAct.activity.inference <- function(
     
     # Find overlapping genes
     olp <- intersect(rownames(Y), rownames(X))
+    
+    # Optionally sort genes alphabetically
+    if (sort_genes) {
+        olp <- sort(olp)
+        if (verbose) cat("  Sorted genes alphabetically\n")
+    }
     
     if (verbose) cat("  Common genes:", length(olp), "\n")
     
@@ -892,6 +917,10 @@ SecAct.activity.inference <- function(
 }
 
 
+# ==============================================================================
+# SECTION 7: TESTING & COMPARISON UTILITIES
+# ==============================================================================
+
 #' Compare All Implementation Methods
 #'
 #' Utility function to verify that all implementations produce identical
@@ -900,26 +929,7 @@ SecAct.activity.inference <- function(
 #' @inheritParams SecAct.inference.gsl.mtyp
 #' @param tol Tolerance for numerical comparison (default: 1e-10)
 #'
-#' @return Invisibly returns a named list containing results from all methods:
-#'   \itemize{
-#'     \item \code{legacy}: Results from .C legacy implementation
-#'     \item \code{styp}: Results from single-threaded Y-permutation
-#'     \item \code{sttp}: Results from single-threaded T-permutation
-#'     \item \code{mtyp}: Results from multi-threaded Y-permutation
-#'     \item \code{mttp}: Results from multi-threaded T-permutation
-#'   }
-#'
-#' @examples
-#' \dontrun{
-#' # Create test data
-#' set.seed(123)
-#' Y <- matrix(rnorm(1000 * 50), nrow = 1000, ncol = 50)
-#' rownames(Y) <- paste0("Gene", 1:1000)
-#' colnames(Y) <- paste0("Sample", 1:50)
-#'
-#' # Compare methods with small nrand for quick testing
-#' results <- SecAct.compare.methods(Y, nrand = 100)
-#' }
+#' @return Invisibly returns a named list containing results from all methods
 #'
 #' @export
 SecAct.compare.methods <- function(Y,
@@ -994,152 +1004,6 @@ SecAct.compare.methods <- function(Y,
     cat(sprintf("  pure R     : %6.2f seconds\n", t_r))
 
     # Return all results invisibly
-    invisible(list(
-        legacy = res_legacy,
-        styp   = res_styp,
-        sttp   = res_sttp,
-        mtyp   = res_mtyp,
-        mttp   = res_mttp,
-        r      = res_r
-    ))
-}
-
-
-#' Compare RidgeR with SecAct Output
-#'
-#' Utility function to compare SecAct.activity.inference results across
-#' different methods and optionally with external SecAct package results.
-#'
-#' @param inputProfile Gene expression matrix (genes x samples)
-#' @param is.differential Logical; if TRUE, inputProfile is already differential
-#' @param sigMatrix Signature matrix path or "SecAct" for default
-#' @param is.group.sig Logical; if TRUE, group similar signatures
-#' @param is.group.cor Correlation threshold for grouping
-#' @param lambda Ridge penalty factor
-#' @param nrand Number of permutations
-#' @param ncores Number of CPU cores
-#'
-#' @return Invisibly returns list of results from all methods
-#'
-#' @examples
-#' \dontrun{
-#' dataPath <- file.path(system.file(package = "RidgeR"), "extdata")
-#' expr.diff <- read.table(paste0(dataPath, "/Ly86-Fc_vs_Vehicle_logFC.txt"))
-#' results <- SecAct.compare.activity(expr.diff, is.differential = TRUE)
-#' }
-#'
-#' @export
-SecAct.compare.activity <- function(
-    inputProfile,
-    is.differential = FALSE,
-    sigMatrix = "SecAct",
-    is.group.sig = TRUE,
-    is.group.cor = 0.9,
-    lambda = 5e+05,
-    nrand = 1000,
-    ncores = NULL
-) {
-    # Helper to time expressions
-    time_it <- function(expr) {
-        system.time(expr)["elapsed"]
-    }
-    
-    cat("Running SecAct.activity.inference with different methods...\n\n")
-    
-    # Run all implementations
-    cat("Method: legacy (.C interface)...\n")
-    t_legacy <- time_it({
-        res_legacy <- SecAct.activity.inference(
-            inputProfile, is.differential = is.differential,
-            sigMatrix = sigMatrix, is.group.sig = is.group.sig,
-            is.group.cor = is.group.cor, lambda = lambda,
-            nrand = nrand, method = "legacy"
-        )
-    })
-    
-    cat("Method: styp (single-threaded, Y-permutation)...\n")
-    t_styp <- time_it({
-        res_styp <- SecAct.activity.inference(
-            inputProfile, is.differential = is.differential,
-            sigMatrix = sigMatrix, is.group.sig = is.group.sig,
-            is.group.cor = is.group.cor, lambda = lambda,
-            nrand = nrand, method = "styp"
-        )
-    })
-    
-    cat("Method: sttp (single-threaded, T-permutation)...\n")
-    t_sttp <- time_it({
-        res_sttp <- SecAct.activity.inference(
-            inputProfile, is.differential = is.differential,
-            sigMatrix = sigMatrix, is.group.sig = is.group.sig,
-            is.group.cor = is.group.cor, lambda = lambda,
-            nrand = nrand, method = "sttp"
-        )
-    })
-    
-    cat("Method: mtyp (multi-threaded, Y-permutation)...\n")
-    t_mtyp <- time_it({
-        res_mtyp <- SecAct.activity.inference(
-            inputProfile, is.differential = is.differential,
-            sigMatrix = sigMatrix, is.group.sig = is.group.sig,
-            is.group.cor = is.group.cor, lambda = lambda,
-            nrand = nrand, ncores = ncores, method = "mtyp"
-        )
-    })
-    
-    cat("Method: mttp (multi-threaded, T-permutation)...\n")
-    t_mttp <- time_it({
-        res_mttp <- SecAct.activity.inference(
-            inputProfile, is.differential = is.differential,
-            sigMatrix = sigMatrix, is.group.sig = is.group.sig,
-            is.group.cor = is.group.cor, lambda = lambda,
-            nrand = nrand, ncores = ncores, method = "mttp"
-        )
-    })
-    
-    cat("Method: r (pure R, no GSL)...\n")
-    t_r <- time_it({
-        res_r <- SecAct.activity.inference(
-            inputProfile, is.differential = is.differential,
-            sigMatrix = sigMatrix, is.group.sig = is.group.sig,
-            is.group.cor = is.group.cor, lambda = lambda,
-            nrand = nrand, method = "r"
-        )
-    })
-    
-    # Report results
-    cat("\n=== Z-score Comparison (first 6 rows) ===\n")
-    cat("\nLegacy:\n")
-    print(head(res_legacy$zscore))
-    cat("\nMTYP:\n")
-    print(head(res_mtyp$zscore))
-    cat("\nPure R:\n")
-    print(head(res_r$zscore))
-    
-    # Check consistency
-    tol <- 1e-10
-    check_equal <- function(a, b) {
-        max(abs(a - b), na.rm = TRUE) < tol
-    }
-    
-    cat("\n=== Consistency Check ===\n")
-    cat(sprintf("  legacy vs styp : %s\n",
-                ifelse(check_equal(res_legacy$zscore, res_styp$zscore), "PASS", "FAIL")))
-    cat(sprintf("  styp   vs mtyp : %s\n",
-                ifelse(check_equal(res_styp$zscore, res_mtyp$zscore), "PASS", "FAIL")))
-    cat(sprintf("  sttp   vs mttp : %s\n",
-                ifelse(check_equal(res_sttp$zscore, res_mttp$zscore), "PASS", "FAIL")))
-    cat(sprintf("  mtyp   vs mttp : %s\n",
-                ifelse(check_equal(res_mtyp$zscore, res_mttp$zscore), "PASS", "FAIL")))
-    
-    cat("\n=== Timing Summary ===\n")
-    cat(sprintf("  legacy : %6.2f seconds\n", t_legacy))
-    cat(sprintf("  styp   : %6.2f seconds\n", t_styp))
-    cat(sprintf("  sttp   : %6.2f seconds\n", t_sttp))
-    cat(sprintf("  mtyp   : %6.2f seconds\n", t_mtyp))
-    cat(sprintf("  mttp   : %6.2f seconds\n", t_mttp))
-    cat(sprintf("  r      : %6.2f seconds\n", t_r))
-    
     invisible(list(
         legacy = res_legacy,
         styp   = res_styp,
@@ -1258,8 +1122,7 @@ SecAct.compare.activity <- function(
 #'
 #' @param inputProfile Either a SpaCET object or a gene expression count matrix
 #'   (genes x spots). If a matrix, rownames should be gene symbols.
-#' @param inputProfile_control Optional control expression data. Either a SpaCET
-#'   object or a count matrix. If NULL, uses mean of inputProfile as control.
+#' @param inputProfile_control Optional control expression data.
 #' @param scale.factor Sets the scale factor for spot-level normalization
 #'   (default: 1e+05, i.e., counts per 100K).
 #' @param sigMatrix Secreted protein signature matrix path or "SecAct" for default.
@@ -1271,43 +1134,12 @@ SecAct.compare.activity <- function(
 #' @param sigFilter Logical indicating whether to filter signatures by available
 #'   genes (default: FALSE).
 #' @param ncores Number of CPU cores for parallel processing (default: auto).
-#' @param method Which implementation to use: "legacy", "styp", "sttp", "mtyp", "mttp", "r"
-#'   (default: "mtyp"). The "r" method uses pure R (no GSL required).
+#' @param method Which implementation to use (default: "sttp").
+#' @param sort_genes Logical; if TRUE, sort common genes alphabetically (default: FALSE).
 #' @param return.SpaCET If inputProfile is a SpaCET object, whether to return
 #'   the modified SpaCET object (TRUE) or just the results list (FALSE).
-#'   Default: TRUE.
 #'
-#' @return If inputProfile is a SpaCET object and return.SpaCET is TRUE, returns
-#'   the SpaCET object with results stored in
-#'   \code{inputProfile@results$SecAct_output$SecretedProteinActivity}.
-#'   Otherwise, returns a named list with beta, se, zscore, pvalue matrices.
-#'
-#' @details
-#' This function performs the following steps:
-#' \enumerate{
-#'   \item Extract count matrix from SpaCET object (if applicable)
-#'   \item Normalize to counts per scale.factor (similar to TPM)
-#'   \item Log2 transform: log2(normalized + 1)
-#'   \item Compute differential expression vs control
-#'   \item Run ridge regression activity inference
-#' }
-#'
-#' For large spatial datasets, the function uses sparse matrix operations
-#' where possible to minimize memory usage.
-#'
-#' @examples
-#' \dontrun{
-#' # With a count matrix
-#' counts <- matrix(rpois(10000 * 1000, lambda = 5), nrow = 10000, ncol = 1000)
-#' rownames(counts) <- paste0("Gene", 1:10000)
-#' colnames(counts) <- paste0("Spot", 1:1000)
-#'
-#' res <- SecAct.activity.inference.ST(counts, nrand = 100)
-#' head(res$zscore)
-#'
-#' # With a SpaCET object
-#' spacet_obj <- SecAct.activity.inference.ST(spacet_obj, nrand = 1000)
-#' }
+#' @return SpaCET object with results or named list with beta, se, zscore, pvalue matrices.
 #'
 #' @export
 SecAct.activity.inference.ST <- function(
@@ -1322,6 +1154,7 @@ SecAct.activity.inference.ST <- function(
     sigFilter = FALSE,
     ncores = NULL,
     method = "sttp",
+    sort_genes = FALSE,
     return.SpaCET = TRUE
 ) {
     # Check if input is a SpaCET object
@@ -1425,7 +1258,8 @@ SecAct.activity.inference.ST <- function(
         nrand = nrand,
         sigFilter = sigFilter,
         ncores = ncores,
-        method = method
+        method = method,
+        sort_genes = sort_genes
     )
     
     # Return results
@@ -1461,14 +1295,12 @@ SecAct.activity.inference.ST <- function(
 #' @param nrand Number of permutations.
 #' @param sigFilter Logical indicating whether to filter signatures.
 #' @param ncores Number of CPU cores for parallel processing.
-#' @param method Which implementation to use: "legacy", "styp", "sttp", "mtyp", "mttp", "r"
-#'   (default: "mtyp"). The "r" method uses pure R (no GSL required).
+#' @param method Which implementation to use (default: "sttp").
+#' @param sort_genes Logical; if TRUE, sort common genes alphabetically (default: FALSE).
 #' @param return.Seurat Whether to return the modified Seurat object (TRUE)
 #'   or just the results list (FALSE).
 #'
-#' @return If return.Seurat is TRUE, returns the Seurat object with results
-#'   stored in \code{inputProfile@misc$SecAct_output$SecretedProteinActivity}.
-#'   Otherwise, returns a named list with beta, se, zscore, pvalue matrices.
+#' @return Seurat object with results or named list with beta, se, zscore, pvalue matrices.
 #'
 #' @export
 SecAct.activity.inference.scRNAseq <- function(
@@ -1483,6 +1315,7 @@ SecAct.activity.inference.scRNAseq <- function(
     sigFilter = FALSE,
     ncores = NULL,
     method = "sttp",
+    sort_genes = FALSE,
     return.Seurat = TRUE
 ) {
     # Check if input is a Seurat object
@@ -1556,7 +1389,8 @@ SecAct.activity.inference.scRNAseq <- function(
         nrand = nrand,
         sigFilter = sigFilter,
         ncores = ncores,
-        method = method
+        method = method,
+        sort_genes = sort_genes
     )
     
     # Return results
