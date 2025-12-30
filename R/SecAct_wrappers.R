@@ -606,7 +606,7 @@ SecAct.activity.inference <- function(
     nrand = 1000,
     sigFilter = FALSE,
     ncores = NULL,
-    method = "mtyp"
+    method = "sttp"
 ) {
     # Compute differential expression if needed
     if (is.differential) {
@@ -1281,7 +1281,7 @@ SecAct.activity.inference.ST <- function(
     nrand = 1000,
     sigFilter = FALSE,
     ncores = NULL,
-    method = "mtyp",
+    method = "sttp",
     return.SpaCET = TRUE
 ) {
     # Check if input is a SpaCET object
@@ -1442,7 +1442,7 @@ SecAct.activity.inference.scRNAseq <- function(
     nrand = 1000,
     sigFilter = FALSE,
     ncores = NULL,
-    method = "mtyp",
+    method = "sttp",
     return.Seurat = TRUE
 ) {
     # Check if input is a Seurat object
