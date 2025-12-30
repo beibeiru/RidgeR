@@ -1014,6 +1014,150 @@ SecAct.compare.methods <- function(Y,
     ))
 }
 
+#' Compare RidgeR with SecAct Output
+#'
+#' Utility function to compare SecAct.activity.inference results across
+#' different methods and optionally with external SecAct package results.
+#'
+#' @param inputProfile Gene expression matrix (genes x samples)
+#' @param is.differential Logical; if TRUE, inputProfile is already differential
+#' @param sigMatrix Signature matrix path or "SecAct" for default
+#' @param is.group.sig Logical; if TRUE, group similar signatures
+#' @param is.group.cor Correlation threshold for grouping
+#' @param lambda Ridge penalty factor
+#' @param nrand Number of permutations
+#' @param ncores Number of CPU cores
+#'
+#' @return Invisibly returns list of results from all methods
+#'
+#' @examples
+#' \dontrun{
+#' dataPath <- file.path(system.file(package = "RidgeR"), "extdata")
+#' expr.diff <- read.table(paste0(dataPath, "/Ly86-Fc_vs_Vehicle_logFC.txt"))
+#' results <- SecAct.compare.activity(expr.diff, is.differential = TRUE)
+#' }
+#'
+#' @export
+SecAct.compare.activity <- function(
+    inputProfile,
+    is.differential = FALSE,
+    sigMatrix = "SecAct",
+    is.group.sig = TRUE,
+    is.group.cor = 0.9,
+    lambda = 5e+05,
+    nrand = 1000,
+    ncores = NULL
+) {
+    # Helper to time expressions
+    time_it <- function(expr) {
+        system.time(expr)["elapsed"]
+    }
+    
+    cat("Running SecAct.activity.inference with different methods...\n\n")
+    
+    # Run all implementations
+    cat("Method: legacy (.C interface)...\n")
+    t_legacy <- time_it({
+        res_legacy <- SecAct.activity.inference(
+            inputProfile, is.differential = is.differential,
+            sigMatrix = sigMatrix, is.group.sig = is.group.sig,
+            is.group.cor = is.group.cor, lambda = lambda,
+            nrand = nrand, method = "legacy"
+        )
+    })
+    
+    cat("Method: styp (single-threaded, Y-permutation)...\n")
+    t_styp <- time_it({
+        res_styp <- SecAct.activity.inference(
+            inputProfile, is.differential = is.differential,
+            sigMatrix = sigMatrix, is.group.sig = is.group.sig,
+            is.group.cor = is.group.cor, lambda = lambda,
+            nrand = nrand, method = "styp"
+        )
+    })
+    
+    cat("Method: sttp (single-threaded, T-permutation)...\n")
+    t_sttp <- time_it({
+        res_sttp <- SecAct.activity.inference(
+            inputProfile, is.differential = is.differential,
+            sigMatrix = sigMatrix, is.group.sig = is.group.sig,
+            is.group.cor = is.group.cor, lambda = lambda,
+            nrand = nrand, method = "sttp"
+        )
+    })
+    
+    cat("Method: mtyp (multi-threaded, Y-permutation)...\n")
+    t_mtyp <- time_it({
+        res_mtyp <- SecAct.activity.inference(
+            inputProfile, is.differential = is.differential,
+            sigMatrix = sigMatrix, is.group.sig = is.group.sig,
+            is.group.cor = is.group.cor, lambda = lambda,
+            nrand = nrand, ncores = ncores, method = "mtyp"
+        )
+    })
+    
+    cat("Method: mttp (multi-threaded, T-permutation)...\n")
+    t_mttp <- time_it({
+        res_mttp <- SecAct.activity.inference(
+            inputProfile, is.differential = is.differential,
+            sigMatrix = sigMatrix, is.group.sig = is.group.sig,
+            is.group.cor = is.group.cor, lambda = lambda,
+            nrand = nrand, ncores = ncores, method = "mttp"
+        )
+    })
+    
+    cat("Method: r (pure R, no GSL)...\n")
+    t_r <- time_it({
+        res_r <- SecAct.activity.inference(
+            inputProfile, is.differential = is.differential,
+            sigMatrix = sigMatrix, is.group.sig = is.group.sig,
+            is.group.cor = is.group.cor, lambda = lambda,
+            nrand = nrand, method = "r"
+        )
+    })
+    
+    # Report results
+    cat("\n=== Z-score Comparison (first 6 rows) ===\n")
+    cat("\nLegacy:\n")
+    print(head(res_legacy$zscore))
+    cat("\nMTYP:\n")
+    print(head(res_mtyp$zscore))
+    cat("\nPure R:\n")
+    print(head(res_r$zscore))
+    
+    # Check consistency
+    tol <- 1e-10
+    check_equal <- function(a, b) {
+        max(abs(a - b), na.rm = TRUE) < tol
+    }
+    
+    cat("\n=== Consistency Check ===\n")
+    cat(sprintf("  legacy vs styp : %s\n",
+                ifelse(check_equal(res_legacy$zscore, res_styp$zscore), "PASS", "FAIL")))
+    cat(sprintf("  styp   vs mtyp : %s\n",
+                ifelse(check_equal(res_styp$zscore, res_mtyp$zscore), "PASS", "FAIL")))
+    cat(sprintf("  sttp   vs mttp : %s\n",
+                ifelse(check_equal(res_sttp$zscore, res_mttp$zscore), "PASS", "FAIL")))
+    cat(sprintf("  mtyp   vs mttp : %s\n",
+                ifelse(check_equal(res_mtyp$zscore, res_mttp$zscore), "PASS", "FAIL")))
+    
+    cat("\n=== Timing Summary ===\n")
+    cat(sprintf("  legacy : %6.2f seconds\n", t_legacy))
+    cat(sprintf("  styp   : %6.2f seconds\n", t_styp))
+    cat(sprintf("  sttp   : %6.2f seconds\n", t_sttp))
+    cat(sprintf("  mtyp   : %6.2f seconds\n", t_mtyp))
+    cat(sprintf("  mttp   : %6.2f seconds\n", t_mttp))
+    cat(sprintf("  r      : %6.2f seconds\n", t_r))
+    
+    invisible(list(
+        legacy = res_legacy,
+        styp   = res_styp,
+        sttp   = res_sttp,
+        mtyp   = res_mtyp,
+        mttp   = res_mttp,
+        r      = res_r
+    ))
+}
 
 # ==============================================================================
 # SECTION 8: ST DATA HELPER FUNCTIONS
