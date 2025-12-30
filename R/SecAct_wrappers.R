@@ -589,10 +589,10 @@ SecAct.inference.r <- function(Y,
 #' @param ncores Number of CPU cores for parallel versions (default: auto)
 #' @param method Which implementation to use: "legacy", "styp", "sttp", "mtyp", "mttp", "r".
 #'   The "r" method uses pure R (no GSL required).
+#' @param verbose If TRUE, print progress messages
 #'
 #' @return Named list with beta, se, zscore, pvalue matrices (proteins x samples)
-#'
-#' @export
+
 SecAct.activity.inference <- function(
     inputProfile,
     inputProfile_control = NULL,
@@ -606,44 +606,65 @@ SecAct.activity.inference <- function(
     nrand = 1000,
     sigFilter = FALSE,
     ncores = NULL,
-    method = "sttp"
+    method = "sttp",
+    verbose = TRUE
 ) {
+    if (verbose) {
+        cat("SecAct Activity Inference\n")
+        cat("==================================================\n")
+        cat("  Input:", nrow(inputProfile), "genes ×", ncol(inputProfile), "samples\n")
+    }
+    
     # Compute differential expression if needed
     if (is.differential) {
         Y <- inputProfile
         if (ncol(Y) == 1) colnames(Y) <- "Change"
+        if (verbose) cat("  Using pre-computed differential expression\n")
     } else {
         if (is.null(inputProfile_control)) {
             Y <- inputProfile - rowMeans(inputProfile)
+            if (verbose) cat("  Differential: expr - rowMeans(expr)\n")
         } else {
             if (is.paired) {
                 Y <- inputProfile - inputProfile_control[, colnames(inputProfile), drop = FALSE]
+                if (verbose) cat("  Differential: paired comparison\n")
             } else {
                 Y <- inputProfile - rowMeans(inputProfile_control)
+                if (verbose) cat("  Differential: expr - mean(control)\n")
             }
             
             if (!is.singleSampleLevel) {
                 Y <- matrix(rowMeans(Y), ncol = 1, 
                            dimnames = list(rownames(Y), "Change"))
+                if (verbose) cat("  Aggregated to single column\n")
             }
         }
     }
     
+    if (verbose) cat("  Expression matrix:", nrow(Y), "genes ×", ncol(Y), "samples\n")
+    
     # Load signature matrix
     X <- .load_signature(sigMatrix)
+    if (verbose) cat("  Loaded signature:", nrow(X), "genes ×", ncol(X), "proteins\n")
     
     # Filter signatures if requested
     if (sigFilter) {
+        n_before <- ncol(X)
         X <- X[, colnames(X) %in% rownames(Y), drop = FALSE]
+        if (verbose) cat("  sig_filter: kept", ncol(X), "/", n_before, "proteins\n")
     }
     
     # Group similar signatures if requested
     if (is.group.sig) {
+        if (verbose) cat("  Grouping signatures (cor_threshold=", is.group.cor, ")...\n", sep = "")
         X <- .group_signatures(X, is.group.cor)
+        if (verbose) cat("  Grouped into", ncol(X), "signature groups\n")
     }
     
     # Find overlapping genes
     olp <- intersect(rownames(Y), rownames(X))
+    
+    if (verbose) cat("  Common genes:", length(olp), "\n")
     
     if (length(olp) < 2) {
         stop("Too few overlapping genes between expression and signature matrices!")
@@ -659,8 +680,18 @@ SecAct.activity.inference <- function(
     X[is.na(X)] <- 0
     Y[is.na(Y)] <- 0
     
+    if (verbose) {
+        cat("  Running ridge regression (n_rand=", nrand, ")...\n", sep = "")
+        cat("    X:", nrow(X), "genes ×", ncol(X), "features\n")
+        cat("    Y:", nrow(Y), "genes ×", ncol(Y), "samples\n")
+        cat("    lambda:", lambda, "\n")
+        cat("    method:", method, "\n")
+    }
+    
     # Run inference using selected method
     ncores <- .default_ncores(ncores)
+    
+    start_time <- Sys.time()
     
     res <- switch(method,
         "legacy" = {
@@ -830,11 +861,15 @@ SecAct.activity.inference <- function(
             
             list(beta = beta, se = se, zscore = zscore, pvalue = pvalue_mat)
         },
-        stop("Unknown method: ", method, ". Valid methods: legacy, old, old2, new, new2, r")
+        stop("Unknown method: ", method, ". Valid methods: legacy, styp, sttp, mtyp, mttp, r")
     )
+    
+    elapsed <- as.numeric(difftime(Sys.time(), start_time, units = "secs"))
+    if (verbose) cat("  Ridge regression completed in", round(elapsed, 2), "seconds\n")
     
     # Expand grouped signatures back to individual rows
     if (is.group.sig) {
+        if (verbose) cat("  Expanding grouped signatures...\n")
         res$beta   <- .expand_rows(res$beta)
         res$se     <- .expand_rows(res$se)
         res$zscore <- .expand_rows(res$zscore)
@@ -846,6 +881,11 @@ SecAct.activity.inference <- function(
         res$se     <- res$se[row_order, , drop = FALSE]
         res$zscore <- res$zscore[row_order, , drop = FALSE]
         res$pvalue <- res$pvalue[row_order, , drop = FALSE]
+    }
+    
+    if (verbose) {
+        cat("  Result shape:", nrow(res$beta), "proteins ×", ncol(res$beta), "samples\n")
+        cat("==================================================\n")
     }
     
     res
