@@ -1663,24 +1663,23 @@ write_secact_to_h5ad <- function(obj, output_file = "SecAct_results.h5ad") {
 
     ## ----------------------------------------------------------------
     ## 4. Store extra matrices as DimReduc objects -> obsm
+    ##    Note: Seurat requires column names in format "KEY_1", "KEY_2", etc.
     ## ----------------------------------------------------------------
-    secact[["se"]] <- Seurat::CreateDimReducObject(
-        embeddings = t(se),
-        key = "SE_",
-        assay = "SecAct"
-    )
+    # Helper to create DimReduc with proper column names
+    create_dimreduc <- function(mat, key, assay_name) {
+        mat_t <- t(mat)
+        # Seurat requires colnames like "SE_1", "SE_2", etc.
+        colnames(mat_t) <- paste0(key, seq_len(ncol(mat_t)))
+        Seurat::CreateDimReducObject(
+            embeddings = mat_t,
+            key = key,
+            assay = assay_name
+        )
+    }
 
-    secact[["zscore"]] <- Seurat::CreateDimReducObject(
-        embeddings = t(zscore),
-        key = "Z_",
-        assay = "SecAct"
-    )
-
-    secact[["pvalue"]] <- Seurat::CreateDimReducObject(
-        embeddings = t(pvalue),
-        key = "P_",
-        assay = "SecAct"
-    )
+    secact[["se"]] <- create_dimreduc(se, "SE_", "SecAct")
+    secact[["zscore"]] <- create_dimreduc(zscore, "Z_", "SecAct")
+    secact[["pvalue"]] <- create_dimreduc(pvalue, "P_", "SecAct")
 
     ## ----------------------------------------------------------------
     ## 5. uns metadata
@@ -1760,16 +1759,27 @@ read_h5ad_to_secact <- function(h5ad_file) {
     ## ----------------------------------------------------------------
     beta <- Seurat::GetAssayData(seu, slot = "counts")
 
-    get_obsm <- function(seu, name) {
+    # Get protein names from misc (stored by write_secact_to_h5ad)
+    protein_names <- seu@misc$protein_names
+    if (is.null(protein_names)) {
+        protein_names <- rownames(beta)
+    }
+
+    get_obsm <- function(seu, name, protein_names) {
         if (name %in% names(seu@reductions)) {
-            return(t(seu@reductions[[name]]@cell.embeddings))
+            mat <- t(seu@reductions[[name]]@cell.embeddings)
+            # Restore protein names as rownames
+            if (!is.null(protein_names) && nrow(mat) == length(protein_names)) {
+                rownames(mat) <- protein_names
+            }
+            return(mat)
         }
         NULL
     }
 
-    se     <- get_obsm(seu, "se")
-    zscore <- get_obsm(seu, "zscore")
-    pvalue <- get_obsm(seu, "pvalue")
+    se     <- get_obsm(seu, "se", protein_names)
+    zscore <- get_obsm(seu, "zscore", protein_names)
+    pvalue <- get_obsm(seu, "pvalue", protein_names)
 
     ## Store back in Seurat misc (SecAct-compatible)
     seu@misc$SecAct_output$SecretedProteinActivity <- list(
