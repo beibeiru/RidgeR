@@ -1694,7 +1694,7 @@ write_secact_to_h5ad <- function(obj, output_file = "SecAct_results.h5ad") {
 
     MuDataSeurat::WriteH5AD(
         object = secact,
-        filename = output_file
+        file = output_file
     )
 
     cat("\nDONE\n")
