@@ -1655,11 +1655,22 @@ write_secact_to_h5ad <- function(obj, output_file = "SecAct_results.h5ad") {
 
     ## ----------------------------------------------------------------
     ## 3. Create Seurat object (proteins x cells)
+    ##    Note: MuDataSeurat doesn't support Seurat v5 Assay5 class,
+    ##    so we create an old-style Assay object directly.
     ## ----------------------------------------------------------------
+    # Create old-style Assay (not Assay5) for MuDataSeurat compatibility
+    assay_obj <- Seurat::CreateAssayObject(counts = beta)
+    
+    # Create Seurat object with the assay
     secact <- Seurat::CreateSeuratObject(
-        counts = beta,
-        assay  = "SecAct"
+        counts = assay_obj,
+        assay = "SecAct"
     )
+    
+    # If Seurat v5 converted to Assay5, convert back to Assay
+    if (inherits(secact@assays$SecAct, "Assay5")) {
+        secact@assays$SecAct <- as(secact@assays$SecAct, "Assay")
+    }
 
     ## ----------------------------------------------------------------
     ## 4. Store extra matrices as DimReduc objects -> obsm
