@@ -1014,150 +1014,6 @@ SecAct.compare.methods <- function(Y,
     ))
 }
 
-#' Compare RidgeR with SecAct Output
-#'
-#' Utility function to compare SecAct.activity.inference results across
-#' different methods and optionally with external SecAct package results.
-#'
-#' @param inputProfile Gene expression matrix (genes x samples)
-#' @param is.differential Logical; if TRUE, inputProfile is already differential
-#' @param sigMatrix Signature matrix path or "SecAct" for default
-#' @param is.group.sig Logical; if TRUE, group similar signatures
-#' @param is.group.cor Correlation threshold for grouping
-#' @param lambda Ridge penalty factor
-#' @param nrand Number of permutations
-#' @param ncores Number of CPU cores
-#'
-#' @return Invisibly returns list of results from all methods
-#'
-#' @examples
-#' \dontrun{
-#' dataPath <- file.path(system.file(package = "RidgeR"), "extdata")
-#' expr.diff <- read.table(paste0(dataPath, "/Ly86-Fc_vs_Vehicle_logFC.txt"))
-#' results <- SecAct.compare.activity(expr.diff, is.differential = TRUE)
-#' }
-#'
-#' @export
-SecAct.compare.activity <- function(
-    inputProfile,
-    is.differential = FALSE,
-    sigMatrix = "SecAct",
-    is.group.sig = TRUE,
-    is.group.cor = 0.9,
-    lambda = 5e+05,
-    nrand = 1000,
-    ncores = NULL
-) {
-    # Helper to time expressions
-    time_it <- function(expr) {
-        system.time(expr)["elapsed"]
-    }
-    
-    cat("Running SecAct.activity.inference with different methods...\n\n")
-    
-    # Run all implementations
-    cat("Method: legacy (.C interface)...\n")
-    t_legacy <- time_it({
-        res_legacy <- SecAct.activity.inference(
-            inputProfile, is.differential = is.differential,
-            sigMatrix = sigMatrix, is.group.sig = is.group.sig,
-            is.group.cor = is.group.cor, lambda = lambda,
-            nrand = nrand, method = "legacy"
-        )
-    })
-    
-    cat("Method: styp (single-threaded, Y-permutation)...\n")
-    t_styp <- time_it({
-        res_styp <- SecAct.activity.inference(
-            inputProfile, is.differential = is.differential,
-            sigMatrix = sigMatrix, is.group.sig = is.group.sig,
-            is.group.cor = is.group.cor, lambda = lambda,
-            nrand = nrand, method = "styp"
-        )
-    })
-    
-    cat("Method: sttp (single-threaded, T-permutation)...\n")
-    t_sttp <- time_it({
-        res_sttp <- SecAct.activity.inference(
-            inputProfile, is.differential = is.differential,
-            sigMatrix = sigMatrix, is.group.sig = is.group.sig,
-            is.group.cor = is.group.cor, lambda = lambda,
-            nrand = nrand, method = "sttp"
-        )
-    })
-    
-    cat("Method: mtyp (multi-threaded, Y-permutation)...\n")
-    t_mtyp <- time_it({
-        res_mtyp <- SecAct.activity.inference(
-            inputProfile, is.differential = is.differential,
-            sigMatrix = sigMatrix, is.group.sig = is.group.sig,
-            is.group.cor = is.group.cor, lambda = lambda,
-            nrand = nrand, ncores = ncores, method = "mtyp"
-        )
-    })
-    
-    cat("Method: mttp (multi-threaded, T-permutation)...\n")
-    t_mttp <- time_it({
-        res_mttp <- SecAct.activity.inference(
-            inputProfile, is.differential = is.differential,
-            sigMatrix = sigMatrix, is.group.sig = is.group.sig,
-            is.group.cor = is.group.cor, lambda = lambda,
-            nrand = nrand, ncores = ncores, method = "mttp"
-        )
-    })
-    
-    cat("Method: r (pure R, no GSL)...\n")
-    t_r <- time_it({
-        res_r <- SecAct.activity.inference(
-            inputProfile, is.differential = is.differential,
-            sigMatrix = sigMatrix, is.group.sig = is.group.sig,
-            is.group.cor = is.group.cor, lambda = lambda,
-            nrand = nrand, method = "r"
-        )
-    })
-    
-    # Report results
-    cat("\n=== Z-score Comparison (first 6 rows) ===\n")
-    cat("\nLegacy:\n")
-    print(head(res_legacy$zscore))
-    cat("\nMTYP:\n")
-    print(head(res_mtyp$zscore))
-    cat("\nPure R:\n")
-    print(head(res_r$zscore))
-    
-    # Check consistency
-    tol <- 1e-10
-    check_equal <- function(a, b) {
-        max(abs(a - b), na.rm = TRUE) < tol
-    }
-    
-    cat("\n=== Consistency Check ===\n")
-    cat(sprintf("  legacy vs styp : %s\n",
-                ifelse(check_equal(res_legacy$zscore, res_styp$zscore), "PASS", "FAIL")))
-    cat(sprintf("  styp   vs mtyp : %s\n",
-                ifelse(check_equal(res_styp$zscore, res_mtyp$zscore), "PASS", "FAIL")))
-    cat(sprintf("  sttp   vs mttp : %s\n",
-                ifelse(check_equal(res_sttp$zscore, res_mttp$zscore), "PASS", "FAIL")))
-    cat(sprintf("  mtyp   vs mttp : %s\n",
-                ifelse(check_equal(res_mtyp$zscore, res_mttp$zscore), "PASS", "FAIL")))
-    
-    cat("\n=== Timing Summary ===\n")
-    cat(sprintf("  legacy : %6.2f seconds\n", t_legacy))
-    cat(sprintf("  styp   : %6.2f seconds\n", t_styp))
-    cat(sprintf("  sttp   : %6.2f seconds\n", t_sttp))
-    cat(sprintf("  mtyp   : %6.2f seconds\n", t_mtyp))
-    cat(sprintf("  mttp   : %6.2f seconds\n", t_mttp))
-    cat(sprintf("  r      : %6.2f seconds\n", t_r))
-    
-    invisible(list(
-        legacy = res_legacy,
-        styp   = res_styp,
-        sttp   = res_sttp,
-        mtyp   = res_mtyp,
-        mttp   = res_mttp,
-        r      = res_r
-    ))
-}
 
 # ==============================================================================
 # SECTION 8: ST DATA HELPER FUNCTIONS
@@ -1552,418 +1408,291 @@ SecAct.activity.inference.scRNAseq <- function(
     }
 }
 
+
 # ==============================================================================
-# SECTION 10: H5ad Output Utility
+# SECTION 10: H5AD I/O UTILITIES
 # ==============================================================================
 
-#' Save SecAct Results to H5AD Format
+#' Write SecAct Results to H5AD Format
 #'
 #' Exports SecAct results (beta, se, zscore, pvalue) from SpaCET or Seurat
 #' objects to H5AD format for interoperability with Python/scanpy.
+#' Uses MuDataSeurat for robust H5AD writing.
 #'
 #' @param obj A SpaCET or Seurat object containing SecAct results.
 #' @param output_file Character string. Output file path (default: "SecAct_results.h5ad").
-#' @param verbose Logical. Print progress messages (default: TRUE).
 #'
 #' @return Invisibly returns the output file path.
 #'
 #' @details
 #' The function creates an anndata-compatible H5AD file with:
 #' \itemize{
-#'   \item \code{X}: Beta coefficients matrix (cells × proteins)
+#'   \item \code{X}: Beta coefficients matrix (cells x proteins)
 #'   \item \code{obsm/se}: Standard errors
 #'   \item \code{obsm/zscore}: Z-scores
 #'   \item \code{obsm/pvalue}: P-values
-#'   \item \code{obs/_index}: Cell/spot names
-#'   \item \code{var/_index}: Protein names
-#'   \item \code{uns/protein_names}: Protein names
-#'   \item \code{uns/source}: Source object type
 #' }
 #'
 #' @section Python Usage:
 #' \preformatted{
 #' import anndata
 #' adata = anndata.read_h5ad("SecAct_results.h5ad")
-#' beta   = adata.X                  # cells × proteins
+#' beta   = adata.X
 #' se     = adata.obsm['se']
 #' zscore = adata.obsm['zscore']
 #' pvalue = adata.obsm['pvalue']
-#' protein_names = list(adata.var_names)
-#' cell_names = list(adata.obs_names)
 #' }
 #'
 #' @examples
 #' \dontrun{
 #' # From SpaCET object
-#' save_secact_to_h5ad(SpaCET_obj, "spacet_results.h5ad")
+#' write_secact_to_h5ad(SpaCET_obj, "spacet_results.h5ad")
 #'
 #' # From Seurat object
-#' save_secact_to_h5ad(seurat_obj, "seurat_results.h5ad")
+#' write_secact_to_h5ad(seurat_obj, "seurat_results.h5ad")
 #' }
 #'
-#' @importFrom rhdf5 h5createFile h5createGroup h5createDataset h5write
-#' @importFrom rhdf5 h5writeAttribute h5closeAll H5Fopen H5Fclose H5Gopen H5Gclose
 #' @export
-save_secact_to_h5ad <- function(obj, output_file = "SecAct_results.h5ad", verbose = TRUE) {
+write_secact_to_h5ad <- function(obj, output_file = "SecAct_results.h5ad") {
 
-  # Check rhdf5 is available
+    if (!requireNamespace("Seurat", quietly = TRUE)) {
+        stop("Package 'Seurat' is required. Install with: install.packages('Seurat')")
+    }
+    if (!requireNamespace("MuDataSeurat", quietly = TRUE)) {
+        stop("Package 'MuDataSeurat' is required. Install with: remotes::install_github('PMBio/MuDataSeurat')")
+    }
 
-if (!requireNamespace("rhdf5", quietly = TRUE)) {
-    stop("Package 'rhdf5' is required. Install with: BiocManager::install('rhdf5')")
-  }
-
-  if (verbose) {
-    cat("Saving SecAct results to H5AD\n")
+    cat("Saving SecAct results to H5AD (MuDataSeurat)\n")
     cat("Output:", output_file, "\n\n")
-  }
 
-  ## ------------------------------------------------------------------
-  ## 1. Detect object type & extract SecAct results
-  ## ------------------------------------------------------------------
-  if (inherits(obj, "SpaCET")) {
-    if (verbose) cat("Detected SpaCET object\n")
+    ## ----------------------------------------------------------------
+    ## 1. Detect object type & extract SecAct results
+    ## ----------------------------------------------------------------
+    if (inherits(obj, "SpaCET")) {
+        cat("Detected SpaCET object\n")
+        if (is.null(obj@results$SecAct_output$SecretedProteinActivity)) {
+            stop("No SecAct results found in SpaCET object. Run SecAct inference first.")
+        }
+        res <- obj@results$SecAct_output$SecretedProteinActivity
+        cell_names <- colnames(res$beta)
+        source <- "SpaCET / SecAct"
 
-    if (is.null(obj@results$SecAct_output$SecretedProteinActivity)) {
-      stop("No SecAct results found in SpaCET object. Run SecAct inference first.")
+    } else if (inherits(obj, "Seurat")) {
+        cat("Detected Seurat object\n")
+        if (is.null(obj@misc$SecAct_output$SecretedProteinActivity)) {
+            stop("No SecAct results found in Seurat object. Run SecAct inference first.")
+        }
+        res <- obj@misc$SecAct_output$SecretedProteinActivity
+        cell_names <- colnames(obj)
+        source <- "Seurat / SecAct"
+
+    } else {
+        stop("Unsupported object type. Must be SpaCET or Seurat.")
     }
-    res <- obj@results$SecAct_output$SecretedProteinActivity
-    cell_names <- colnames(res$beta)
 
-  } else if (inherits(obj, "Seurat")) {
-    if (verbose) cat("Detected Seurat object\n")
+    ## ----------------------------------------------------------------
+    ## 2. Extract matrices
+    ## ----------------------------------------------------------------
+    beta   <- as.matrix(res$beta)
+    se     <- as.matrix(res$se)
+    zscore <- as.matrix(res$zscore)
+    pvalue <- as.matrix(res$pvalue)
 
-    if (is.null(obj@misc$SecAct_output$SecretedProteinActivity)) {
-      stop("No SecAct results found in Seurat object. Run SecAct inference first.")
-    }
-    res <- obj@misc$SecAct_output$SecretedProteinActivity
-    cell_names <- colnames(obj)
-
-  } else {
-    stop("Unsupported object type. Must be SpaCET or Seurat.")
-  }
-
-  ## ------------------------------------------------------------------
-  ## 2. Extract matrices
-  ## ------------------------------------------------------------------
-  beta   <- as.matrix(res$beta)
-  se     <- as.matrix(res$se)
-  zscore <- as.matrix(res$zscore)
-  pvalue <- as.matrix(res$pvalue)
-
-  # Validate dimensions
-  stopifnot(
-    "Dimension mismatch between beta and se" = identical(dim(beta), dim(se)),
-    "Dimension mismatch between beta and zscore" = identical(dim(beta), dim(zscore)),
-    "Dimension mismatch between beta and pvalue" = identical(dim(beta), dim(pvalue))
-  )
-
-  protein_names <- rownames(beta)
-  n_cells       <- length(cell_names)
-  n_proteins    <- length(protein_names)
-
-  if (verbose) {
-    cat("Cells   :", n_cells, "\n")
-    cat("Proteins:", n_proteins, "\n\n")
-  }
-
-  ## ------------------------------------------------------------------
-  ## 3. Create H5AD file
-  ## ------------------------------------------------------------------
-  # Clean up any open handles and remove existing file
-  rhdf5::h5closeAll()
-  if (file.exists(output_file)) file.remove(output_file)
-
-  # Create file and groups
-  rhdf5::h5createFile(output_file)
-  rhdf5::h5createGroup(output_file, "obs")
-  rhdf5::h5createGroup(output_file, "var")
-  rhdf5::h5createGroup(output_file, "obsm")
-  rhdf5::h5createGroup(output_file, "uns")
-  rhdf5::h5closeAll()
-
-  ## ------------------------------------------------------------------
-  ## 4. Helper: write matrix with chunking (proteins × cells → cells × proteins)
-  ## ------------------------------------------------------------------
-  write_matrix <- function(mat, dataset_name) {
-    mat_t <- t(mat)  # Transpose: proteins × cells → cells × proteins
-    dims  <- dim(mat_t)
-
-    # Determine chunk size
-    chunk_rows <- min(1000L, dims[1])
-    chunk_cols <- dims[2]
-
-    rhdf5::h5createDataset(
-      file    = output_file,
-      dataset = dataset_name,
-      dims    = dims,
-      chunk   = c(chunk_rows, chunk_cols),
-      level   = 4  # gzip compression level
+    stopifnot(
+        "Dimension mismatch between beta and se" = identical(dim(beta), dim(se)),
+        "Dimension mismatch between beta and zscore" = identical(dim(beta), dim(zscore)),
+        "Dimension mismatch between beta and pvalue" = identical(dim(beta), dim(pvalue))
     )
-    rhdf5::h5write(mat_t, output_file, dataset_name)
-    rhdf5::h5closeAll()
-  }
 
-  ## ------------------------------------------------------------------
-  ## 5. Write matrices
-  ## ------------------------------------------------------------------
-  if (verbose) cat("Writing X (beta)...\n")
-  write_matrix(beta, "X")
+    protein_names <- rownames(beta)
 
-  if (verbose) cat("Writing obsm/se...\n")
-  write_matrix(se, "obsm/se")
+    cat("Cells   :", ncol(beta), "\n")
+    cat("Proteins:", nrow(beta), "\n\n")
 
-  if (verbose) cat("Writing obsm/zscore...\n")
-  write_matrix(zscore, "obsm/zscore")
+    ## ----------------------------------------------------------------
+    ## 3. Create Seurat object (proteins x cells)
+    ## ----------------------------------------------------------------
+    secact <- Seurat::CreateSeuratObject(
+        counts = beta,
+        assay  = "SecAct"
+    )
 
-  if (verbose) cat("Writing obsm/pvalue...\n")
-  write_matrix(pvalue, "obsm/pvalue")
+    ## ----------------------------------------------------------------
+    ## 4. Store extra matrices as DimReduc objects -> obsm
+    ## ----------------------------------------------------------------
+    secact[["se"]] <- Seurat::CreateDimReducObject(
+        embeddings = t(se),
+        key = "SE_",
+        assay = "SecAct"
+    )
 
-  ## ------------------------------------------------------------------
-  ## 6. Write indices
-  ## ------------------------------------------------------------------
-  if (verbose) cat("Writing obs/_index...\n")
-  rhdf5::h5write(cell_names, output_file, "obs/_index")
-  rhdf5::h5closeAll()
+    secact[["zscore"]] <- Seurat::CreateDimReducObject(
+        embeddings = t(zscore),
+        key = "Z_",
+        assay = "SecAct"
+    )
 
-  if (verbose) cat("Writing var/_index...\n")
-  rhdf5::h5write(protein_names, output_file, "var/_index")
-  rhdf5::h5closeAll()
+    secact[["pvalue"]] <- Seurat::CreateDimReducObject(
+        embeddings = t(pvalue),
+        key = "P_",
+        assay = "SecAct"
+    )
 
-  ## ------------------------------------------------------------------
-  ## 7. Write uns metadata
-  ## ------------------------------------------------------------------
-  if (verbose) cat("Writing uns metadata...\n")
-  rhdf5::h5write(protein_names, output_file, "uns/protein_names")
-  rhdf5::h5closeAll()
+    ## ----------------------------------------------------------------
+    ## 5. uns metadata
+    ## ----------------------------------------------------------------
+    secact@misc$SecAct_source <- source
+    secact@misc$protein_names <- protein_names
 
-  source_type <- if (inherits(obj, "SpaCET")) "SpaCET / SecAct" else "Seurat / SecAct"
-  rhdf5::h5write(source_type, output_file, "uns/source")
-  rhdf5::h5closeAll()
+    ## ----------------------------------------------------------------
+    ## 6. Write H5AD
+    ## ----------------------------------------------------------------
+    if (file.exists(output_file)) file.remove(output_file)
 
-  ## ------------------------------------------------------------------
-  ## 8. Add anndata compatibility attributes
-  ## ------------------------------------------------------------------
-  if (verbose) cat("Adding anndata attributes...\n")
+    MuDataSeurat::WriteH5AD(
+        object = secact,
+        filename = output_file
+    )
 
-  fid <- rhdf5::H5Fopen(output_file)
-
-  # Root attributes
-  rhdf5::h5writeAttribute("0.8.0", fid, "encoding-version")
-  rhdf5::h5writeAttribute("anndata", fid, "encoding-type")
-
-  # obs attributes
-  obs_id <- rhdf5::H5Gopen(fid, "obs")
-  rhdf5::h5writeAttribute("dataframe", obs_id, "encoding-type")
-  rhdf5::h5writeAttribute("0.2.0", obs_id, "encoding-version")
-  rhdf5::h5writeAttribute("_index", obs_id, "_index")
-  rhdf5::h5writeAttribute(character(0), obs_id, "column-order")
-  rhdf5::H5Gclose(obs_id)
-
-  # var attributes
-  var_id <- rhdf5::H5Gopen(fid, "var")
-  rhdf5::h5writeAttribute("dataframe", var_id, "encoding-type")
-  rhdf5::h5writeAttribute("0.2.0", var_id, "encoding-version")
-  rhdf5::h5writeAttribute("_index", var_id, "_index")
-  rhdf5::h5writeAttribute(character(0), var_id, "column-order")
-  rhdf5::H5Gclose(var_id)
-
-  rhdf5::H5Fclose(fid)
-  rhdf5::h5closeAll()
-
-  ## ------------------------------------------------------------------
-  ## 9. Summary
-  ## ------------------------------------------------------------------
-  if (verbose) {
     cat("\nDONE\n")
     cat("File size:", sprintf("%.2f MB", file.info(output_file)$size / 1e6), "\n")
 
     cat("\nPython usage:\n")
     cat("  import anndata\n")
     cat("  adata = anndata.read_h5ad('", basename(output_file), "')\n", sep = "")
-    cat("  beta   = adata.X                    # (", n_cells, " x ", n_proteins, ")\n", sep = "")
+    cat("  beta   = adata.X\n")
     cat("  se     = adata.obsm['se']\n")
     cat("  zscore = adata.obsm['zscore']\n")
     cat("  pvalue = adata.obsm['pvalue']\n")
-    cat("  protein_names = list(adata.var_names)\n")
-  }
 
-  invisible(output_file)
+    invisible(output_file)
 }
 
 
-#' Save Ridge Regression Results to H5AD Format
+#' Read H5AD File into Seurat or SpaCET Object
 #'
-#' Exports ridge regression results (beta, se, zscore, pvalue) from a list
-#' to H5AD format for interoperability with Python/scanpy.
+#' Read an AnnData (.h5ad) file and convert it to a Seurat object
+#' (no spatial data) or SpaCET object (if spatial data available).
 #'
-#' @param results List containing beta, se, zscore, pvalue matrices.
-#' @param output_file Character string. Output file path (default: "ridge_results.h5ad").
-#' @param feature_names Character vector. Feature/protein names (default: rownames of beta).
-#' @param sample_names Character vector. Sample/cell names (default: colnames of beta).
-#' @param verbose Logical. Print progress messages (default: TRUE).
+#' @param h5ad_file Path to .h5ad file
 #'
-#' @return Invisibly returns the output file path.
+#' @return A Seurat or SpaCET object with SecAct results in misc/results slot.
+#'
+#' @details
+#' This function reads H5AD files created by \code{write_secact_to_h5ad()} or
+#' Python SecActPy and reconstructs the SecAct result matrices.
 #'
 #' @examples
 #' \dontrun{
-#' results <- ridge(X, Y, n_rand = 1000)
-#' save_ridge_to_h5ad(results, "ridge_results.h5ad")
+#' # Read H5AD file
+#' obj <- read_h5ad_to_secact("SecAct_results.h5ad")
+#'
+#' # Access results
+#' res <- obj@misc$SecAct_output$SecretedProteinActivity
+#' zscore <- res$zscore
 #' }
 #'
-#' @importFrom rhdf5 h5createFile h5createGroup h5createDataset h5write
-#' @importFrom rhdf5 h5writeAttribute h5closeAll H5Fopen H5Fclose H5Gopen H5Gclose
 #' @export
-save_ridge_to_h5ad <- function(results,
-                                output_file = "ridge_results.h5ad",
-                                feature_names = NULL,
-                                sample_names = NULL,
-                                verbose = TRUE) {
+read_h5ad_to_secact <- function(h5ad_file) {
 
-  # Check rhdf5 is available
-  if (!requireNamespace("rhdf5", quietly = TRUE)) {
-    stop("Package 'rhdf5' is required. Install with: BiocManager::install('rhdf5')")
-  }
-
-  if (verbose) {
-    cat("Saving ridge results to H5AD\n")
-    cat("Output:", output_file, "\n\n")
-  }
-
-  ## ------------------------------------------------------------------
-  ## 1. Extract matrices
-  ## ------------------------------------------------------------------
-  beta   <- as.matrix(results$beta)
-  se     <- as.matrix(results$se)
-  zscore <- as.matrix(results$zscore)
-  pvalue <- as.matrix(results$pvalue)
-
-  n_features <- nrow(beta)
-  n_samples  <- ncol(beta)
-
-  # Handle names
-  if (is.null(feature_names)) {
-    feature_names <- rownames(beta)
-    if (is.null(feature_names)) {
-      feature_names <- paste0("Feature_", seq_len(n_features))
+    if (!file.exists(h5ad_file)) {
+        stop("h5ad_file does not exist: ", h5ad_file)
     }
-  }
 
-  if (is.null(sample_names)) {
-    sample_names <- colnames(beta)
-    if (is.null(sample_names)) {
-      sample_names <- paste0("Sample_", seq_len(n_samples))
+    if (!requireNamespace("Seurat", quietly = TRUE)) {
+        stop("Package 'Seurat' is required. Install with: install.packages('Seurat')")
     }
-  }
+    if (!requireNamespace("MuDataSeurat", quietly = TRUE)) {
+        stop("Package 'MuDataSeurat' is required. Install with: remotes::install_github('PMBio/MuDataSeurat')")
+    }
 
-  if (verbose) {
-    cat("Features:", n_features, "\n")
-    cat("Samples :", n_samples, "\n\n")
-  }
+    ## ----------------------------------------------------------------
+    ## 1. Read H5AD -> Seurat
+    ## ----------------------------------------------------------------
+    seu <- MuDataSeurat::ReadH5AD(h5ad_file)
 
-  ## ------------------------------------------------------------------
-  ## 2. Create H5AD file
-  ## ------------------------------------------------------------------
-  rhdf5::h5closeAll()
-  if (file.exists(output_file)) file.remove(output_file)
+    ## ----------------------------------------------------------------
+    ## 2. Recover SecAct matrices
+    ## ----------------------------------------------------------------
+    beta <- Seurat::GetAssayData(seu, slot = "counts")
 
-  rhdf5::h5createFile(output_file)
-  rhdf5::h5createGroup(output_file, "obs")
-  rhdf5::h5createGroup(output_file, "var")
-  rhdf5::h5createGroup(output_file, "obsm")
-  rhdf5::h5createGroup(output_file, "uns")
-  rhdf5::h5closeAll()
+    get_obsm <- function(seu, name) {
+        if (name %in% names(seu@reductions)) {
+            return(t(seu@reductions[[name]]@cell.embeddings))
+        }
+        NULL
+    }
 
-  ## ------------------------------------------------------------------
-  ## 3. Write matrices (features × samples → samples × features)
-  ## ------------------------------------------------------------------
-  write_matrix <- function(mat, dataset_name) {
-    mat_t <- t(mat)
-    dims  <- dim(mat_t)
-    chunk_rows <- min(1000L, dims[1])
-    chunk_cols <- dims[2]
+    se     <- get_obsm(seu, "se")
+    zscore <- get_obsm(seu, "zscore")
+    pvalue <- get_obsm(seu, "pvalue")
 
-    rhdf5::h5createDataset(
-      file    = output_file,
-      dataset = dataset_name,
-      dims    = dims,
-      chunk   = c(chunk_rows, chunk_cols),
-      level   = 4
+    ## Store back in Seurat misc (SecAct-compatible)
+    seu@misc$SecAct_output$SecretedProteinActivity <- list(
+        beta   = beta,
+        se     = se,
+        zscore = zscore,
+        pvalue = pvalue
     )
-    rhdf5::h5write(mat_t, output_file, dataset_name)
-    rhdf5::h5closeAll()
-  }
 
-  if (verbose) cat("Writing X (beta)...\n")
-  write_matrix(beta, "X")
+    ## ----------------------------------------------------------------
+    ## 3. Detect spatial data
+    ## ----------------------------------------------------------------
+    has_spatial <- FALSE
 
-  if (verbose) cat("Writing obsm/se...\n")
-  write_matrix(se, "obsm/se")
+    if ("spatial" %in% names(seu@images)) {
+        img <- seu@images$spatial
 
-  if (verbose) cat("Writing obsm/zscore...\n")
-  write_matrix(zscore, "obsm/zscore")
+        if (!is.null(img@coordinates) &&
+            nrow(img@coordinates) == ncol(seu)) {
+            has_spatial <- TRUE
+        }
+    }
 
-  if (verbose) cat("Writing obsm/pvalue...\n")
-  write_matrix(pvalue, "obsm/pvalue")
+    ## ----------------------------------------------------------------
+    ## 4. Return SpaCET object if spatial
+    ## ----------------------------------------------------------------
+    if (has_spatial) {
 
-  ## ------------------------------------------------------------------
-  ## 4. Write indices
-  ## ------------------------------------------------------------------
-  if (verbose) cat("Writing indices...\n")
-  rhdf5::h5write(sample_names, output_file, "obs/_index")
-  rhdf5::h5closeAll()
+        if (!requireNamespace("SpaCET", quietly = TRUE)) {
+            warning("SpaCET package not available. Returning Seurat object instead.")
+            return(seu)
+        }
 
-  rhdf5::h5write(feature_names, output_file, "var/_index")
-  rhdf5::h5closeAll()
+        coords <- seu@images$spatial@coordinates[, c("imagecol", "imagerow")]
+        colnames(coords) <- c("pixel_col", "pixel_row")
 
-  ## ------------------------------------------------------------------
-  ## 5. Write metadata
-  ## ------------------------------------------------------------------
-  rhdf5::h5write(feature_names, output_file, "uns/feature_names")
-  rhdf5::h5write("RidgeR", output_file, "uns/source")
-  rhdf5::h5closeAll()
+        spotCoordinates <- cbind(
+            coords,
+            array_row = coords[, "pixel_row"],
+            array_col = coords[, "pixel_col"]
+        )
 
-  ## ------------------------------------------------------------------
-  ## 6. Add anndata compatibility attributes
-  ## ------------------------------------------------------------------
-  if (verbose) cat("Adding anndata attributes...\n")
+        metaData <- data.frame(
+            barcode = colnames(seu),
+            row.names = colnames(seu)
+        )
 
-  fid <- rhdf5::H5Fopen(output_file)
+        imagePath <- NA
+        if (!is.null(seu@images$spatial@image)) {
+            imagePath <- attr(seu@images$spatial@image, "filepath")
+        }
 
-  rhdf5::h5writeAttribute("0.8.0", fid, "encoding-version")
-  rhdf5::h5writeAttribute("anndata", fid, "encoding-type")
+        SpaCET_obj <- SpaCET::create.SpaCET.object(
+            counts          = beta,
+            spotCoordinates = spotCoordinates,
+            metaData        = metaData,
+            imagePath       = imagePath,
+            platform        = "ImportedH5AD"
+        )
 
-  obs_id <- rhdf5::H5Gopen(fid, "obs")
-  rhdf5::h5writeAttribute("dataframe", obs_id, "encoding-type")
-  rhdf5::h5writeAttribute("0.2.0", obs_id, "encoding-version")
-  rhdf5::h5writeAttribute("_index", obs_id, "_index")
-  rhdf5::h5writeAttribute(character(0), obs_id, "column-order")
-  rhdf5::H5Gclose(obs_id)
+        SpaCET_obj@results$SecAct_output <- seu@misc$SecAct_output
 
-  var_id <- rhdf5::H5Gopen(fid, "var")
-  rhdf5::h5writeAttribute("dataframe", var_id, "encoding-type")
-  rhdf5::h5writeAttribute("0.2.0", var_id, "encoding-version")
-  rhdf5::h5writeAttribute("_index", var_id, "_index")
-  rhdf5::h5writeAttribute(character(0), var_id, "column-order")
-  rhdf5::H5Gclose(var_id)
+        return(SpaCET_obj)
+    }
 
-  rhdf5::H5Fclose(fid)
-  rhdf5::h5closeAll()
-
-  ## ------------------------------------------------------------------
-  ## 7. Summary
-  ## ------------------------------------------------------------------
-  if (verbose) {
-    cat("\nDONE\n")
-    cat("File size:", sprintf("%.2f MB", file.info(output_file)$size / 1e6), "\n")
-
-    cat("\nPython usage:\n")
-    cat("  import anndata\n")
-    cat("  adata = anndata.read_h5ad('", basename(output_file), "')\n", sep = "")
-    cat("  beta   = adata.X                    # (", n_samples, " x ", n_features, ")\n", sep = "")
-    cat("  se     = adata.obsm['se']\n")
-    cat("  zscore = adata.obsm['zscore']\n")
-    cat("  pvalue = adata.obsm['pvalue']\n")
-  }
-
-  invisible(output_file)
+    ## ----------------------------------------------------------------
+    ## 5. Otherwise return Seurat
+    ## ----------------------------------------------------------------
+    return(seu)
 }
