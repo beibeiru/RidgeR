@@ -1559,12 +1559,13 @@ SecAct.activity.inference.scRNAseq <- function(
 
 #' Write SecAct Results to H5AD Format (Python-compatible)
 #'
-#' Exports SecAct results (beta, se, zscore, pvalue) from SpaCET or Seurat
-#' objects to H5AD format for interoperability with Python/scanpy.
+#' Exports SecAct results (beta, se, zscore, pvalue) from SpaCET, Seurat objects,
+#' or a list to H5AD format for interoperability with Python/scanpy.
 #' 
 #' Uses reticulate + anndata for fully valid H5AD output.
 #'
-#' @param obj A SpaCET or Seurat object containing SecAct results.
+#' @param obj A SpaCET object, Seurat object, or a list containing SecAct results.
+#'   If a list, it should contain: beta, se, zscore, pvalue matrices (proteins x cells).
 #' @param output_file Character string. Output file path (default: "SecAct_results.h5ad").
 #' @param compression Character string. Compression method: "gzip" or NULL (default: "gzip").
 #'
@@ -1608,6 +1609,10 @@ SecAct.activity.inference.scRNAseq <- function(
 #'
 #' # From Seurat object
 #' write_secact_to_h5ad(seurat_obj, "seurat_results.h5ad")
+#'
+#' # From list (direct SecAct output)
+#' res <- list(beta = beta_mat, se = se_mat, zscore = zscore_mat, pvalue = pvalue_mat)
+#' write_secact_to_h5ad(res, "results.h5ad")
 #' }
 #'
 #' @export
@@ -1629,7 +1634,6 @@ write_secact_to_h5ad <- function(obj, output_file = "SecAct_results.h5ad", compr
             stop("No SecAct results found in SpaCET object. Run SecAct inference first.")
         }
         res <- obj@results$SecAct_output$SecretedProteinActivity
-        cell_names <- colnames(res$beta)
         source <- "SpaCET / SecAct"
 
     } else if (inherits(obj, "Seurat")) {
@@ -1638,11 +1642,22 @@ write_secact_to_h5ad <- function(obj, output_file = "SecAct_results.h5ad", compr
             stop("No SecAct results found in Seurat object. Run SecAct inference first.")
         }
         res <- obj@misc$SecAct_output$SecretedProteinActivity
-        cell_names <- colnames(res$beta)
         source <- "Seurat / SecAct"
 
+    } else if (is.list(obj)) {
+        cat("Detected list object\n")
+        # Validate list has required components
+        required <- c("beta", "se", "zscore", "pvalue")
+        missing <- setdiff(required, names(obj))
+        if (length(missing) > 0) {
+            stop("List is missing required components: ", paste(missing, collapse = ", "),
+                 "\nRequired: beta, se, zscore, pvalue")
+        }
+        res <- obj
+        source <- "List / SecAct"
+
     } else {
-        stop("Unsupported object type. Must be SpaCET or Seurat.")
+        stop("Unsupported object type. Must be SpaCET, Seurat, or a list with beta/se/zscore/pvalue.")
     }
 
     ## ----------------------------------------------------------------
@@ -1659,7 +1674,20 @@ write_secact_to_h5ad <- function(obj, output_file = "SecAct_results.h5ad", compr
         "Dimension mismatch between beta and pvalue" = identical(dim(beta_r), dim(pvalue_r))
     )
 
+    # Get names from matrix dimensions
     protein_names <- rownames(beta_r)
+    cell_names <- colnames(beta_r)
+    
+    # Generate names if missing
+    if (is.null(protein_names)) {
+        protein_names <- paste0("protein_", seq_len(nrow(beta_r)))
+        warning("No protein names found in rownames(beta). Using auto-generated names.")
+    }
+    if (is.null(cell_names)) {
+        cell_names <- paste0("cell_", seq_len(ncol(beta_r)))
+        warning("No cell names found in colnames(beta). Using auto-generated names.")
+    }
+    
     n_proteins <- nrow(beta_r)
     n_cells <- ncol(beta_r)
 
@@ -1878,4 +1906,3 @@ read_h5ad_to_secact <- function(h5ad_file) {
     
     return(seu)
 }
-
