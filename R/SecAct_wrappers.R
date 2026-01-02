@@ -1805,6 +1805,8 @@ write_secact_to_h5ad <- function(obj, output_file = "SecAct_results.h5ad", compr
 #' Read an AnnData (.h5ad) file and convert it to a Seurat object
 #' (no spatial data) or SpaCET object (if spatial data available).
 #'
+#' Uses reticulate + anndata for proper H5AD reading.
+#'
 #' @param h5ad_file Path to .h5ad file
 #'
 #' @return A Seurat or SpaCET object with SecAct results in misc/results slot.
@@ -1856,8 +1858,10 @@ read_h5ad_to_secact <- function(h5ad_file) {
     ## ----------------------------------------------------------------
     # Get X as dense numpy array, then convert to R
     X_py <- adata$X
-    if (inherits(X_py, "scipy.sparse.csr.csr_matrix") || 
-        inherits(X_py, "scipy.sparse.csc.csc_matrix")) {
+    
+    # Handle sparse matrices
+    scipy_sparse <- reticulate::import("scipy.sparse", delay_load = FALSE)
+    if (scipy_sparse$issparse(X_py)) {
         X_py <- X_py$toarray()
     }
     beta_py <- reticulate::py_to_r(np$array(X_py))
@@ -1870,8 +1874,7 @@ read_h5ad_to_secact <- function(h5ad_file) {
     get_obsm_matrix <- function(name) {
         if (name %in% names(adata$obsm)) {
             mat <- adata$obsm[[name]]
-            if (inherits(mat, "scipy.sparse.csr.csr_matrix") || 
-                inherits(mat, "scipy.sparse.csc.csc_matrix")) {
+            if (scipy_sparse$issparse(mat)) {
                 mat <- mat$toarray()
             }
             return(reticulate::py_to_r(np$array(mat)))
