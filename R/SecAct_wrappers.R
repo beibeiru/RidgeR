@@ -1557,11 +1557,15 @@ SecAct.activity.inference.scRNAseq <- function(
 # SECTION 10: H5AD I/O UTILITIES
 # ==============================================================================
 
-#' Write SecAct Results to H5AD Format
+#' Write SecAct Results to H5AD Format (Python-compatible)
 #'
 #' Exports SecAct results (beta, se, zscore, pvalue) from SpaCET or Seurat
 #' objects to H5AD format for interoperability with Python/scanpy.
-#' Uses MuDataSeurat for robust H5AD writing.
+#' 
+#' IMPORTANT: This function saves data in Python/anndata convention:
+#' - obs (rows) = cells/samples
+#' - var (columns) = proteins/features
+#' - X shape = (n_cells, n_proteins)
 #'
 #' @param obj A SpaCET or Seurat object containing SecAct results.
 #' @param output_file Character string. Output file path (default: "SecAct_results.h5ad").
@@ -1572,19 +1576,22 @@ SecAct.activity.inference.scRNAseq <- function(
 #' The function creates an anndata-compatible H5AD file with:
 #' \itemize{
 #'   \item \code{X}: Beta coefficients matrix (cells x proteins)
-#'   \item \code{obsm/se}: Standard errors
-#'   \item \code{obsm/zscore}: Z-scores
-#'   \item \code{obsm/pvalue}: P-values
+#'   \item \code{obsm/se}: Standard errors (cells x proteins)
+#'   \item \code{obsm/zscore}: Z-scores (cells x proteins)
+#'   \item \code{obsm/pvalue}: P-values (cells x proteins)
+#'   \item \code{uns/protein_names}: Protein names for reference
 #' }
 #'
 #' @section Python Usage:
 #' \preformatted{
 #' import anndata
 #' adata = anndata.read_h5ad("SecAct_results.h5ad")
-#' beta   = adata.X
-#' se     = adata.obsm['se']
-#' zscore = adata.obsm['zscore']
-#' pvalue = adata.obsm['pvalue']
+#' beta   = adata.X                    # (n_cells, n_proteins)
+#' se     = adata.obsm['se']           # (n_cells, n_proteins)
+#' zscore = adata.obsm['zscore']       # (n_cells, n_proteins)
+#' pvalue = adata.obsm['pvalue']       # (n_cells, n_proteins)
+#' protein_names = adata.var_names     # protein names
+#' cell_names    = adata.obs_names     # cell/sample names
 #' }
 #'
 #' @examples
@@ -1606,7 +1613,7 @@ write_secact_to_h5ad <- function(obj, output_file = "SecAct_results.h5ad") {
         stop("Package 'MuDataSeurat' is required. Install with: remotes::install_github('PMBio/MuDataSeurat')")
     }
 
-    cat("Saving SecAct results to H5AD (MuDataSeurat)\n")
+    cat("Saving SecAct results to H5AD (Python-compatible format)\n")
     cat("Output:", output_file, "\n\n")
 
     ## ----------------------------------------------------------------
@@ -1635,49 +1642,247 @@ write_secact_to_h5ad <- function(obj, output_file = "SecAct_results.h5ad") {
     }
 
     ## ----------------------------------------------------------------
-    ## 2. Extract matrices
+    ## 2. Extract matrices (R format: proteins x cells)
     ## ----------------------------------------------------------------
-    beta   <- as.matrix(res$beta)
-    se     <- as.matrix(res$se)
-    zscore <- as.matrix(res$zscore)
-    pvalue <- as.matrix(res$pvalue)
+    beta_r   <- as.matrix(res$beta)      # proteins x cells
+    se_r     <- as.matrix(res$se)        # proteins x cells
+    zscore_r <- as.matrix(res$zscore)    # proteins x cells
+    pvalue_r <- as.matrix(res$pvalue)    # proteins x cells
 
     stopifnot(
-        "Dimension mismatch between beta and se" = identical(dim(beta), dim(se)),
-        "Dimension mismatch between beta and zscore" = identical(dim(beta), dim(zscore)),
-        "Dimension mismatch between beta and pvalue" = identical(dim(beta), dim(pvalue))
+        "Dimension mismatch between beta and se" = identical(dim(beta_r), dim(se_r)),
+        "Dimension mismatch between beta and zscore" = identical(dim(beta_r), dim(zscore_r)),
+        "Dimension mismatch between beta and pvalue" = identical(dim(beta_r), dim(pvalue_r))
     )
 
-    protein_names <- rownames(beta)
+    protein_names <- rownames(beta_r)
+    n_proteins <- nrow(beta_r)
+    n_cells <- ncol(beta_r)
 
-    cat("Cells   :", ncol(beta), "\n")
-    cat("Proteins:", nrow(beta), "\n\n")
+    cat("Cells   :", n_cells, "\n")
+    cat("Proteins:", n_proteins, "\n\n")
 
     ## ----------------------------------------------------------------
-    ## 3. Create Seurat object (proteins x cells)
+    ## 3. Transpose to Python format (cells x proteins)
+    ##    Python/anndata convention: obs=cells, var=features
+    ## ----------------------------------------------------------------
+    cat("Transposing to Python format (cells x proteins)...\n")
+    
+    beta   <- t(beta_r)      # cells x proteins
+    se     <- t(se_r)        # cells x proteins
+    zscore <- t(zscore_r)    # cells x proteins
+    pvalue <- t(pvalue_r)    # cells x proteins
+    
+    # Set proper row/column names
+    rownames(beta)   <- cell_names
+    rownames(se)     <- cell_names
+    rownames(zscore) <- cell_names
+    rownames(pvalue) <- cell_names
+    
+    colnames(beta)   <- protein_names
+    colnames(se)     <- protein_names
+    colnames(zscore) <- protein_names
+    colnames(pvalue) <- protein_names
+
+    cat("Output shape: (", n_cells, " x ", n_proteins, ") = (cells x proteins)\n\n", sep = "")
+
+    ## ----------------------------------------------------------------
+    ## 4. Create Seurat object (cells x proteins)
     ##    Note: MuDataSeurat doesn't support Seurat v5 Assay5 class,
     ##    so we temporarily force v3 assay format.
+    ##    Seurat expects features (proteins) as rows, cells as columns,
+    ##    so we transpose again for Seurat, then MuDataSeurat will
+    ##    handle the final transpose to anndata format.
     ## ----------------------------------------------------------------
     # Temporarily disable Seurat v5 assay format
     old_option <- getOption("Seurat.object.assay.version")
     options(Seurat.object.assay.version = "v3")
     on.exit(options(Seurat.object.assay.version = old_option), add = TRUE)
 
-    # Create Seurat object with v3 assay
+    # Seurat stores as (features x cells), but we want anndata to have (cells x features)
+    # MuDataSeurat::WriteH5AD transposes automatically, so we provide (proteins x cells)
+    # Actually, let's use a different approach - write directly with rhdf5
+    
+    ## ----------------------------------------------------------------
+    ## 5. Write H5AD directly using rhdf5 for full control
+    ## ----------------------------------------------------------------
+    if (!requireNamespace("rhdf5", quietly = TRUE)) {
+        stop("Package 'rhdf5' is required. Install with: BiocManager::install('rhdf5')")
+    }
+    
+    if (file.exists(output_file)) file.remove(output_file)
+    
+    # Create HDF5 file
+    rhdf5::h5createFile(output_file)
+    
+    # Write X matrix (cells x proteins) - main data
+    rhdf5::h5write(beta, output_file, "X")
+    
+    # Create obs group (cells metadata)
+    rhdf5::h5createGroup(output_file, "obs")
+    rhdf5::h5write(cell_names, output_file, "obs/_index")
+    
+    # Create var group (proteins metadata)
+    rhdf5::h5createGroup(output_file, "var")
+    rhdf5::h5write(protein_names, output_file, "var/_index")
+    
+    # Create obsm group (cell-level matrices)
+    rhdf5::h5createGroup(output_file, "obsm")
+    rhdf5::h5write(se, output_file, "obsm/se")
+    rhdf5::h5write(zscore, output_file, "obsm/zscore")
+    rhdf5::h5write(pvalue, output_file, "obsm/pvalue")
+    
+    # Create uns group (unstructured metadata)
+    rhdf5::h5createGroup(output_file, "uns")
+    rhdf5::h5write(source, output_file, "uns/source")
+    rhdf5::h5write(protein_names, output_file, "uns/protein_names")
+    
+    # Add anndata compatibility attributes
+    fid <- rhdf5::H5Fopen(output_file)
+    
+    # Root attributes
+    rhdf5::h5writeAttribute("anndata", fid, "encoding-type")
+    rhdf5::h5writeAttribute("0.8.0", fid, "encoding-version")
+    
+    # obs attributes
+    obs_gid <- rhdf5::H5Gopen(fid, "obs")
+    rhdf5::h5writeAttribute("dataframe", obs_gid, "encoding-type")
+    rhdf5::h5writeAttribute("0.2.0", obs_gid, "encoding-version")
+    rhdf5::h5writeAttribute("_index", obs_gid, "_index")
+    rhdf5::h5writeAttribute(character(0), obs_gid, "column-order")
+    rhdf5::H5Gclose(obs_gid)
+    
+    # var attributes
+    var_gid <- rhdf5::H5Gopen(fid, "var")
+    rhdf5::h5writeAttribute("dataframe", var_gid, "encoding-type")
+    rhdf5::h5writeAttribute("0.2.0", var_gid, "encoding-version")
+    rhdf5::h5writeAttribute("_index", var_gid, "_index")
+    rhdf5::h5writeAttribute(character(0), var_gid, "column-order")
+    rhdf5::H5Gclose(var_gid)
+    
+    rhdf5::H5Fclose(fid)
+
+    cat("\nDONE\n")
+    cat("File size:", sprintf("%.2f MB", file.info(output_file)$size / 1e6), "\n")
+
+    cat("\nPython usage:\n")
+    cat("  import anndata\n")
+    cat("  adata = anndata.read_h5ad('", basename(output_file), "')\n", sep = "")
+    cat("  beta   = adata.X                    # shape: (", n_cells, ", ", n_proteins, ")\n", sep = "")
+    cat("  se     = adata.obsm['se']           # shape: (", n_cells, ", ", n_proteins, ")\n", sep = "")
+    cat("  zscore = adata.obsm['zscore']       # shape: (", n_cells, ", ", n_proteins, ")\n", sep = "")
+    cat("  pvalue = adata.obsm['pvalue']       # shape: (", n_cells, ", ", n_proteins, ")\n", sep = "")
+    cat("  proteins = list(adata.var_names)   # ", n_proteins, " protein names\n", sep = "")
+    cat("  cells    = list(adata.obs_names)   # ", n_cells, " cell names\n", sep = "")
+
+    invisible(output_file)
+}
+
+
+#' Write SecAct Results to H5AD (Alternative using MuDataSeurat)
+#'
+#' Alternative implementation using MuDataSeurat for writing.
+#' This may be more compatible with some Seurat workflows.
+#'
+#' @param obj A SpaCET or Seurat object containing SecAct results.
+#' @param output_file Character string. Output file path.
+#'
+#' @return Invisibly returns the output file path.
+#'
+#' @export
+write_secact_to_h5ad_mudata <- function(obj, output_file = "SecAct_results.h5ad") {
+
+    if (!requireNamespace("Seurat", quietly = TRUE)) {
+        stop("Package 'Seurat' is required. Install with: install.packages('Seurat')")
+    }
+    if (!requireNamespace("MuDataSeurat", quietly = TRUE)) {
+        stop("Package 'MuDataSeurat' is required. Install with: remotes::install_github('PMBio/MuDataSeurat')")
+    }
+
+    cat("Saving SecAct results to H5AD (MuDataSeurat method)\n")
+    cat("Output:", output_file, "\n\n")
+
+    ## ----------------------------------------------------------------
+    ## 1. Detect object type & extract SecAct results
+    ## ----------------------------------------------------------------
+    if (inherits(obj, "SpaCET")) {
+        cat("Detected SpaCET object\n")
+        if (is.null(obj@results$SecAct_output$SecretedProteinActivity)) {
+            stop("No SecAct results found in SpaCET object. Run SecAct inference first.")
+        }
+        res <- obj@results$SecAct_output$SecretedProteinActivity
+        cell_names <- colnames(res$beta)
+        source <- "SpaCET / SecAct"
+
+    } else if (inherits(obj, "Seurat")) {
+        cat("Detected Seurat object\n")
+        if (is.null(obj@misc$SecAct_output$SecretedProteinActivity)) {
+            stop("No SecAct results found in Seurat object. Run SecAct inference first.")
+        }
+        res <- obj@misc$SecAct_output$SecretedProteinActivity
+        cell_names <- colnames(res$beta)
+        source <- "Seurat / SecAct"
+
+    } else {
+        stop("Unsupported object type. Must be SpaCET or Seurat.")
+    }
+
+    ## ----------------------------------------------------------------
+    ## 2. Extract and transpose matrices to (cells x proteins)
+    ## ----------------------------------------------------------------
+    beta_r   <- as.matrix(res$beta)      # proteins x cells
+    se_r     <- as.matrix(res$se)
+    zscore_r <- as.matrix(res$zscore)
+    pvalue_r <- as.matrix(res$pvalue)
+
+    protein_names <- rownames(beta_r)
+    n_proteins <- nrow(beta_r)
+    n_cells <- ncol(beta_r)
+
+    cat("Cells   :", n_cells, "\n")
+    cat("Proteins:", n_proteins, "\n")
+    cat("Creating transposed Seurat object (cells as observations)...\n\n")
+
+    ## ----------------------------------------------------------------
+    ## 3. Create Seurat with TRANSPOSED data
+    ##    Key insight: Create Seurat with cells as "features" and proteins as "cells"
+    ##    Then MuDataSeurat will write it such that anndata sees:
+    ##    - obs = what Seurat calls "cells" = our proteins
+    ##    - var = what Seurat calls "features" = our cells
+    ##    
+    ##    Actually, we need to be clever here. Let's create a Seurat object
+    ##    where the counts matrix is (proteins x cells) but we TELL Seurat
+    ##    that rows are cells and columns are proteins by transposing.
+    ## ----------------------------------------------------------------
+    
+    # Transpose so rows=cells, cols=proteins (what we want in anndata)
+    beta_t   <- t(beta_r)   # cells x proteins
+    se_t     <- t(se_r)
+    zscore_t <- t(zscore_r)
+    pvalue_t <- t(pvalue_r)
+    
+    rownames(beta_t) <- cell_names
+    colnames(beta_t) <- protein_names
+    
+    # Temporarily disable Seurat v5 assay format
+    old_option <- getOption("Seurat.object.assay.version")
+    options(Seurat.object.assay.version = "v3")
+    on.exit(options(Seurat.object.assay.version = old_option), add = TRUE)
+
+    # Create Seurat: Seurat expects (features x cells), so transpose again
+    # This gives Seurat (proteins x cells), and MuDataSeurat outputs (cells x proteins) to anndata
     secact <- Seurat::CreateSeuratObject(
-        counts = beta,
+        counts = t(beta_t),  # proteins x cells for Seurat
         assay = "SecAct"
     )
 
     ## ----------------------------------------------------------------
     ## 4. Store extra matrices as DimReduc objects -> obsm
-    ##    Note: Seurat requires column names in format "KEY_1", "KEY_2", etc.
     ## ----------------------------------------------------------------
-    # Helper to create DimReduc with proper column names
-    create_dimreduc <- function(mat, key, assay_name) {
-        mat_t <- t(mat)
-        # Seurat requires colnames like "SE_1", "SE_2", etc.
+    create_dimreduc <- function(mat_t, key, assay_name) {
+        # mat_t is (cells x proteins), already transposed
         colnames(mat_t) <- paste0(key, seq_len(ncol(mat_t)))
+        rownames(mat_t) <- cell_names
         Seurat::CreateDimReducObject(
             embeddings = mat_t,
             key = key,
@@ -1685,9 +1890,9 @@ write_secact_to_h5ad <- function(obj, output_file = "SecAct_results.h5ad") {
         )
     }
 
-    secact[["se"]] <- create_dimreduc(se, "SE_", "SecAct")
-    secact[["zscore"]] <- create_dimreduc(zscore, "Z_", "SecAct")
-    secact[["pvalue"]] <- create_dimreduc(pvalue, "P_", "SecAct")
+    secact[["se"]] <- create_dimreduc(se_t, "SE_", "SecAct")
+    secact[["zscore"]] <- create_dimreduc(zscore_t, "Z_", "SecAct")
+    secact[["pvalue"]] <- create_dimreduc(pvalue_t, "P_", "SecAct")
 
     ## ----------------------------------------------------------------
     ## 5. uns metadata
@@ -1711,6 +1916,7 @@ write_secact_to_h5ad <- function(obj, output_file = "SecAct_results.h5ad") {
     cat("\nPython usage:\n")
     cat("  import anndata\n")
     cat("  adata = anndata.read_h5ad('", basename(output_file), "')\n", sep = "")
+    cat("  # adata.shape = (", n_cells, ", ", n_proteins, ") = (cells, proteins)\n", sep = "")
     cat("  beta   = adata.X\n")
     cat("  se     = adata.obsm['se']\n")
     cat("  zscore = adata.obsm['zscore']\n")
@@ -1732,13 +1938,17 @@ write_secact_to_h5ad <- function(obj, output_file = "SecAct_results.h5ad") {
 #' @details
 #' This function reads H5AD files created by \code{write_secact_to_h5ad()} or
 #' Python SecActPy and reconstructs the SecAct result matrices.
+#' 
+#' The function handles both:
+#' - Python format: X is (cells x proteins)
+#' - Legacy R format: X is (proteins x cells)
 #'
 #' @examples
 #' \dontrun{
 #' # Read H5AD file
 #' obj <- read_h5ad_to_secact("SecAct_results.h5ad")
 #'
-#' # Access results
+#' # Access results (always returns R format: proteins x cells)
 #' res <- obj@misc$SecAct_output$SecretedProteinActivity
 #' zscore <- res$zscore
 #' }
@@ -1750,118 +1960,128 @@ read_h5ad_to_secact <- function(h5ad_file) {
         stop("h5ad_file does not exist: ", h5ad_file)
     }
 
+    if (!requireNamespace("rhdf5", quietly = TRUE)) {
+        stop("Package 'rhdf5' is required. Install with: BiocManager::install('rhdf5')")
+    }
     if (!requireNamespace("Seurat", quietly = TRUE)) {
         stop("Package 'Seurat' is required. Install with: install.packages('Seurat')")
     }
-    if (!requireNamespace("MuDataSeurat", quietly = TRUE)) {
-        stop("Package 'MuDataSeurat' is required. Install with: remotes::install_github('PMBio/MuDataSeurat')")
-    }
+
+    cat("Reading H5AD file:", h5ad_file, "\n")
 
     ## ----------------------------------------------------------------
-    ## 1. Read H5AD -> Seurat
+    ## 1. Read H5AD structure
     ## ----------------------------------------------------------------
-    seu <- MuDataSeurat::ReadH5AD(h5ad_file)
+    # Get X matrix
+    X <- rhdf5::h5read(h5ad_file, "X")
+    
+    # Get obs and var indices
+    obs_names <- tryCatch({
+        idx <- rhdf5::h5read(h5ad_file, "obs/_index")
+        if (is.raw(idx[[1]])) idx <- sapply(idx, rawToChar)
+        as.character(idx)
+    }, error = function(e) NULL)
+    
+    var_names <- tryCatch({
+        idx <- rhdf5::h5read(h5ad_file, "var/_index")
+        if (is.raw(idx[[1]])) idx <- sapply(idx, rawToChar)
+        as.character(idx)
+    }, error = function(e) NULL)
+    
+    cat("X shape:", paste(dim(X), collapse = " x "), "\n")
+    cat("obs (rows):", length(obs_names), "\n")
+    cat("var (cols):", length(var_names), "\n")
 
     ## ----------------------------------------------------------------
-    ## 2. Recover SecAct matrices (Seurat v5 compatible)
+    ## 2. Detect format and transpose if needed
+    ##    Python format: X is (cells x proteins), obs=cells, var=proteins
+    ##    R format: X is (proteins x cells), obs=proteins, var=cells
     ## ----------------------------------------------------------------
-    # Use layer instead of slot for Seurat v5 compatibility
-    beta <- tryCatch({
-        # Seurat v5 syntax
-        Seurat::GetAssayData(seu, layer = "counts")
-    }, error = function(e) {
-        # Fallback for older Seurat versions
-        Seurat::GetAssayData(seu, slot = "counts")
-    })
-
-    # Get protein names from misc (stored by write_secact_to_h5ad)
-    protein_names <- seu@misc$protein_names
-    if (is.null(protein_names)) {
-        protein_names <- rownames(beta)
-    }
-
-    get_obsm <- function(seu, name, protein_names) {
-        if (name %in% names(seu@reductions)) {
-            mat <- t(seu@reductions[[name]]@cell.embeddings)
-            # Restore protein names as rownames
-            if (!is.null(protein_names) && nrow(mat) == length(protein_names)) {
-                rownames(mat) <- protein_names
-            }
-            return(mat)
+    # Heuristic: if obs has few entries and var has many, it's old R format
+    is_r_format <- FALSE
+    if (!is.null(obs_names) && !is.null(var_names)) {
+        if (length(obs_names) < 2000 && length(var_names) > 10000) {
+            is_r_format <- TRUE
+            cat("Detected legacy R format (proteins x cells)\n")
+        } else {
+            cat("Detected Python format (cells x proteins)\n")
         }
-        NULL
     }
+    
+    if (is_r_format) {
+        # R format: obs=proteins, var=cells
+        # Convert to R internal format (proteins x cells)
+        beta <- X
+        protein_names <- obs_names
+        cell_names <- var_names
+        rownames(beta) <- protein_names
+        colnames(beta) <- cell_names
+    } else {
+        # Python format: obs=cells, var=proteins
+        # Transpose to R internal format (proteins x cells)
+        beta <- t(X)
+        protein_names <- var_names
+        cell_names <- obs_names
+        rownames(beta) <- protein_names
+        colnames(beta) <- cell_names
+    }
+    
+    cat("Output shape (R format):", paste(dim(beta), collapse = " x "), "(proteins x cells)\n")
 
-    se     <- get_obsm(seu, "se", protein_names)
-    zscore <- get_obsm(seu, "zscore", protein_names)
-    pvalue <- get_obsm(seu, "pvalue", protein_names)
+    ## ----------------------------------------------------------------
+    ## 3. Read obsm matrices
+    ## ----------------------------------------------------------------
+    read_obsm <- function(name) {
+        mat <- tryCatch({
+            rhdf5::h5read(h5ad_file, paste0("obsm/", name))
+        }, error = function(e) NULL)
+        
+        if (is.null(mat)) return(NULL)
+        
+        if (is_r_format) {
+            # R format: obsm is already (proteins x cells) - but wait, obsm is always (n_obs x features)
+            # So in R format, obsm is (proteins x ???), need to check dimensions
+            # Actually obsm should be (n_obs x n_features_in_obsm)
+            # This is tricky - let's just transpose if needed
+            if (nrow(mat) == length(cell_names)) {
+                mat <- t(mat)
+            }
+        } else {
+            # Python format: obsm is (cells x proteins), transpose to (proteins x cells)
+            mat <- t(mat)
+        }
+        
+        rownames(mat) <- protein_names
+        colnames(mat) <- cell_names
+        mat
+    }
+    
+    se     <- read_obsm("se")
+    zscore <- read_obsm("zscore")
+    pvalue <- read_obsm("pvalue")
 
-    ## Store back in Seurat misc (SecAct-compatible)
+    ## ----------------------------------------------------------------
+    ## 4. Create Seurat object
+    ## ----------------------------------------------------------------
+    old_option <- getOption("Seurat.object.assay.version")
+    options(Seurat.object.assay.version = "v3")
+    on.exit(options(Seurat.object.assay.version = old_option), add = TRUE)
+    
+    seu <- Seurat::CreateSeuratObject(
+        counts = beta,
+        assay = "SecAct"
+    )
+    
+    ## Store SecAct results in misc
     seu@misc$SecAct_output$SecretedProteinActivity <- list(
         beta   = beta,
         se     = se,
         zscore = zscore,
         pvalue = pvalue
     )
+    seu@misc$protein_names <- protein_names
 
-    ## ----------------------------------------------------------------
-    ## 3. Detect spatial data
-    ## ----------------------------------------------------------------
-    has_spatial <- FALSE
-
-    if ("spatial" %in% names(seu@images)) {
-        img <- seu@images$spatial
-
-        if (!is.null(img@coordinates) &&
-            nrow(img@coordinates) == ncol(seu)) {
-            has_spatial <- TRUE
-        }
-    }
-
-    ## ----------------------------------------------------------------
-    ## 4. Return SpaCET object if spatial
-    ## ----------------------------------------------------------------
-    if (has_spatial) {
-
-        if (!requireNamespace("SpaCET", quietly = TRUE)) {
-            warning("SpaCET package not available. Returning Seurat object instead.")
-            return(seu)
-        }
-
-        coords <- seu@images$spatial@coordinates[, c("imagecol", "imagerow")]
-        colnames(coords) <- c("pixel_col", "pixel_row")
-
-        spotCoordinates <- cbind(
-            coords,
-            array_row = coords[, "pixel_row"],
-            array_col = coords[, "pixel_col"]
-        )
-
-        metaData <- data.frame(
-            barcode = colnames(seu),
-            row.names = colnames(seu)
-        )
-
-        imagePath <- NA
-        if (!is.null(seu@images$spatial@image)) {
-            imagePath <- attr(seu@images$spatial@image, "filepath")
-        }
-
-        SpaCET_obj <- SpaCET::create.SpaCET.object(
-            counts          = beta,
-            spotCoordinates = spotCoordinates,
-            metaData        = metaData,
-            imagePath       = imagePath,
-            platform        = "ImportedH5AD"
-        )
-
-        SpaCET_obj@results$SecAct_output <- seu@misc$SecAct_output
-
-        return(SpaCET_obj)
-    }
-
-    ## ----------------------------------------------------------------
-    ## 5. Otherwise return Seurat
-    ## ----------------------------------------------------------------
+    cat("Created Seurat object with SecAct results\n")
+    
     return(seu)
 }
