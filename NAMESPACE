@@ -2,6 +2,7 @@
 
 export(read_h5ad_to_secact)
 export(write_secact_to_h5ad)
+export(write_secact_to_h5ad_mudata)
 
 export(SecAct.compare.activity)
 export(SecAct.compare.methods)
