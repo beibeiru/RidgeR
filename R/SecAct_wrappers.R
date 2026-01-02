@@ -1749,20 +1749,23 @@ write_secact_to_h5ad <- function(obj, output_file = "SecAct_results.h5ad", compr
     if (file.exists(output_file)) file.remove(output_file)
     
     # Use Python directly to avoid reticulate type conversion issues
-    # Pass data to Python environment
+    # Import modules
     reticulate::py_run_string("import anndata")
     reticulate::py_run_string("import numpy as np")
     
+    # Get the Python main module to pass data
+    py <- reticulate::import("__main__")
+    
     # Pass matrices to Python
-    reticulate::py$X_data <- beta
-    reticulate::py$se_data <- se
-    reticulate::py$zscore_data <- zscore
-    reticulate::py$pvalue_data <- pvalue
-    reticulate::py$cell_names <- as.list(cell_names)
-    reticulate::py$protein_names <- as.list(protein_names)
-    reticulate::py$output_file <- output_file
-    reticulate::py$source_info <- source
-    reticulate::py$use_compression <- !is.null(compression) && compression == "gzip"
+    py$X_data <- beta
+    py$se_data <- se
+    py$zscore_data <- zscore
+    py$pvalue_data <- pvalue
+    py$cell_names <- as.list(cell_names)
+    py$protein_names <- as.list(protein_names)
+    py$output_file <- output_file
+    py$source_info <- source
+    py$use_compression <- !is.null(compression) && compression == "gzip"
     
     # Run Python code to create and save AnnData
     reticulate::py_run_string("
