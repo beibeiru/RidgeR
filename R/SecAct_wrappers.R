@@ -1557,6 +1557,9 @@ SecAct.activity.inference.scRNAseq <- function(
 # SECTION 10: H5AD I/O UTILITIES
 # ==============================================================================
 
+# Helper for null-coalescing (if x is NULL, use y)
+`%||%` <- function(x, y) if (is.null(x)) y else x
+
 #' Write SecAct Results to H5AD Format (Python-compatible)
 #'
 #' Exports SecAct results (beta, se, zscore, pvalue) from SpaCET, Seurat objects,
@@ -1621,6 +1624,10 @@ write_secact_to_h5ad <- function(obj, output_file = "SecAct_results.h5ad", compr
     if (!requireNamespace("reticulate", quietly = TRUE)) {
         stop("Package 'reticulate' is required. Install with: install.packages('reticulate')")
     }
+    
+    if (!reticulate::py_module_available("anndata")) {
+        stop("Python module 'anndata' is not installed. Run: reticulate::py_install('anndata')")
+    }
 
     cat("Saving SecAct results to H5AD (via Python anndata)\n")
     cat("Output:", output_file, "\n\n")
@@ -1673,10 +1680,9 @@ write_secact_to_h5ad <- function(obj, output_file = "SecAct_results.h5ad", compr
     if (is.vector(beta_r) && is.null(dim(beta_r))) {
         cat("Detected single-sample data (vectors). Converting to matrices...\n")
         
-        # Get protein names from vector names
-        protein_names <- names(beta_r)
-        if (is.null(protein_names)) {
-            protein_names <- paste0("protein_", seq_along(beta_r))
+        # Get protein names from vector names (or auto-generate)
+        protein_names <- names(beta_r) %||% paste0("protein_", seq_along(beta_r))
+        if (is.null(names(beta_r))) {
             warning("No protein names found. Using auto-generated names.")
         }
         
@@ -1741,35 +1747,36 @@ write_secact_to_h5ad <- function(obj, output_file = "SecAct_results.h5ad", compr
     cat("Output shape: (", n_cells, " x ", n_proteins, ") = (cells x proteins)\n\n", sep = "")
 
     ## ----------------------------------------------------------------
-    ## 4. Write H5AD using anndata (CORRECT way)
+    ## 4. Write H5AD using anndata (via py_run_string)
     ## ----------------------------------------------------------------
     cat("Writing H5AD via Python anndata...\n")
     
-    # Remove existing file if present
     if (file.exists(output_file)) file.remove(output_file)
     
-    # Use Python directly to avoid reticulate type conversion issues
-    # Import modules
-    reticulate::py_run_string("import anndata")
-    reticulate::py_run_string("import numpy as np")
+    # Safely import main module to assign variables
+    py_main <- reticulate::import_main()
     
-    # Get the Python main module to pass data
-    py <- reticulate::import("__main__")
+    # Assign data to Python main module
+    py_main$X_data <- beta
+    py_main$se_data <- se
+    py_main$zscore_data <- zscore
+    py_main$pvalue_data <- pvalue
+    py_main$cell_names <- cell_names
+    py_main$protein_names <- protein_names
+    py_main$output_file <- output_file
+    py_main$source_info <- source
+    py_main$use_compression <- !is.null(compression) && compression == "gzip"
     
-    # Pass matrices to Python
-    py$X_data <- beta
-    py$se_data <- se
-    py$zscore_data <- zscore
-    py$pvalue_data <- pvalue
-    py$cell_names <- as.list(cell_names)
-    py$protein_names <- as.list(protein_names)
-    py$output_file <- output_file
-    py$source_info <- source
-    py$use_compression <- !is.null(compression) && compression == "gzip"
-    
-    # Run Python code to create and save AnnData
+    # Run Python code using the variables set in main
     reticulate::py_run_string("
-# Convert to numpy arrays and ensure 2D
+import anndata
+import numpy as np
+import warnings
+
+# Suppress annoying warnings if any
+warnings.filterwarnings('ignore')
+
+# Ensure 2D arrays (float64)
 X_np = np.atleast_2d(np.array(X_data, dtype=np.float64))
 se_np = np.atleast_2d(np.array(se_data, dtype=np.float64))
 zscore_np = np.atleast_2d(np.array(zscore_data, dtype=np.float64))
@@ -1783,9 +1790,9 @@ print(f'  pvalue shape: {pvalue_np.shape}')
 # Create AnnData
 adata = anndata.AnnData(X=X_np)
 
-# Set names
-adata.obs_names = cell_names
-adata.var_names = protein_names
+# Set dimension names
+adata.obs_names = [str(x) for x in cell_names]
+adata.var_names = [str(x) for x in protein_names]
 
 # Add obsm
 adata.obsm['se'] = se_np
@@ -1799,7 +1806,7 @@ adata.uns['source'] = source_info
 adata.uns['data_type'] = 'SecAct results'
 adata.uns['description'] = 'X=beta, obsm={se,zscore,pvalue}'
 
-# Write file
+# Write
 if use_compression:
     adata.write_h5ad(output_file, compression='gzip')
 else:
@@ -1807,7 +1814,11 @@ else:
 ")
 
     cat("\nDONE\n")
-    cat("File size:", sprintf("%.2f MB", file.info(output_file)$size / 1e6), "\n")
+    if (file.exists(output_file)) {
+        cat("File size:", sprintf("%.2f MB", file.info(output_file)$size / 1e6), "\n")
+    } else {
+        warning("Output file was not created. Check Python configuration.")
+    }
 
     cat("\nPython usage:\n")
     cat("  import anndata\n")
@@ -1861,61 +1872,85 @@ read_h5ad_to_secact <- function(h5ad_file) {
     if (!requireNamespace("Seurat", quietly = TRUE)) {
         stop("Package 'Seurat' is required. Install with: install.packages('Seurat')")
     }
+    if (!reticulate::py_module_available("anndata")) {
+        stop("Python module 'anndata' is not installed. Run: reticulate::py_install('anndata')")
+    }
 
     cat("Reading H5AD file:", h5ad_file, "\n")
 
     ## ----------------------------------------------------------------
-    ## 1. Read H5AD using anndata
+    ## 1. Read H5AD using anndata via py_run_string
     ## ----------------------------------------------------------------
-    anndata <- reticulate::import("anndata", delay_load = FALSE)
-    np <- reticulate::import("numpy", delay_load = FALSE)
+    py_main <- reticulate::import_main()
+    py_main$h5ad_file <- h5ad_file
     
-    adata <- anndata$read_h5ad(h5ad_file)
+    reticulate::py_run_string("
+import anndata
+import numpy as np
+
+# Read the file
+adata = anndata.read_h5ad(h5ad_file)
+
+# Extract X (make dense if sparse)
+if hasattr(adata.X, 'toarray'):
+    X_out = adata.X.toarray()
+else:
+    X_out = np.array(adata.X)
+
+# Get names
+obs_names_out = list(adata.obs_names)
+var_names_out = list(adata.var_names)
+
+# Get obsm matrices
+se_out = None
+zscore_out = None
+pvalue_out = None
+
+if 'se' in adata.obsm:
+    mat = adata.obsm['se']
+    se_out = mat.toarray() if hasattr(mat, 'toarray') else np.array(mat)
+
+if 'zscore' in adata.obsm:
+    mat = adata.obsm['zscore']
+    zscore_out = mat.toarray() if hasattr(mat, 'toarray') else np.array(mat)
+
+if 'pvalue' in adata.obsm:
+    mat = adata.obsm['pvalue']
+    pvalue_out = mat.toarray() if hasattr(mat, 'toarray') else np.array(mat)
+
+# Store shape info
+n_obs = adata.n_obs
+n_var = adata.n_vars
+obsm_keys = list(adata.obsm.keys())
+")
+
+    # Retrieve data from Python
+    X_py <- py_main$X_out
+    obs_names <- py_main$obs_names_out
+    var_names <- py_main$var_names_out
+    se_py <- py_main$se_out
+    zscore_py <- py_main$zscore_out
+    pvalue_py <- py_main$pvalue_out
+    n_obs <- py_main$n_obs
+    n_var <- py_main$n_var
+    obsm_keys <- py_main$obsm_keys
     
-    cat("Shape:", adata$shape[[1]], "x", adata$shape[[2]], "\n")
-    cat("obs (rows):", length(adata$obs_names), "\n")
-    cat("var (cols):", length(adata$var_names), "\n")
+    cat("Shape:", n_obs, "x", n_var, "\n")
+    cat("obs (rows):", length(obs_names), "\n")
+    cat("var (cols):", length(var_names), "\n")
+    cat("obsm keys:", paste(obsm_keys, collapse = ", "), "\n")
 
     ## ----------------------------------------------------------------
-    ## 2. Extract matrices (Python format: cells x proteins)
+    ## 2. Convert to R format (proteins x cells)
     ## ----------------------------------------------------------------
-    # Get X as dense numpy array, then convert to R
-    X_py <- adata$X
-    
-    # Handle sparse matrices
-    scipy_sparse <- reticulate::import("scipy.sparse", delay_load = FALSE)
-    if (scipy_sparse$issparse(X_py)) {
-        X_py <- X_py$toarray()
-    }
-    beta_py <- reticulate::py_to_r(np$array(X_py))
-    
-    # Get obs/var names
-    cell_names <- reticulate::py_to_r(adata$obs_names$tolist())
-    protein_names <- reticulate::py_to_r(adata$var_names$tolist())
-    
-    # Get obsm matrices
-    get_obsm_matrix <- function(name) {
-        if (name %in% names(adata$obsm)) {
-            mat <- adata$obsm[[name]]
-            if (scipy_sparse$issparse(mat)) {
-                mat <- mat$toarray()
-            }
-            return(reticulate::py_to_r(np$array(mat)))
-        }
-        return(NULL)
-    }
-    
-    se_py <- get_obsm_matrix("se")
-    zscore_py <- get_obsm_matrix("zscore")
-    pvalue_py <- get_obsm_matrix("pvalue")
-
-    ## ----------------------------------------------------------------
-    ## 3. Transpose to R format (proteins x cells)
-    ## ----------------------------------------------------------------
-    beta <- t(beta_py)
+    # X is (cells x proteins) in Python, transpose to (proteins x cells)
+    beta <- t(X_py)
+    protein_names <- var_names
+    cell_names <- obs_names
     rownames(beta) <- protein_names
     colnames(beta) <- cell_names
     
+    # Transpose obsm matrices
     if (!is.null(se_py)) {
         se <- t(se_py)
         rownames(se) <- protein_names
@@ -1943,7 +1978,7 @@ read_h5ad_to_secact <- function(h5ad_file) {
     cat("Output shape (R format):", nrow(beta), "x", ncol(beta), "(proteins x cells)\n")
 
     ## ----------------------------------------------------------------
-    ## 4. Create Seurat object
+    ## 3. Create Seurat object
     ## ----------------------------------------------------------------
     old_option <- getOption("Seurat.object.assay.version")
     options(Seurat.object.assay.version = "v3")
