@@ -1662,11 +1662,36 @@ write_secact_to_h5ad <- function(obj, output_file = "SecAct_results.h5ad", compr
 
     ## ----------------------------------------------------------------
     ## 2. Extract matrices (R format: proteins x cells)
+    ##    Handle both matrix and vector (single sample) inputs
     ## ----------------------------------------------------------------
-    beta_r   <- as.matrix(res$beta)      # proteins x cells
-    se_r     <- as.matrix(res$se)        # proteins x cells
-    zscore_r <- as.matrix(res$zscore)    # proteins x cells
-    pvalue_r <- as.matrix(res$pvalue)    # proteins x cells
+    beta_r   <- res$beta
+    se_r     <- res$se
+    zscore_r <- res$zscore
+    pvalue_r <- res$pvalue
+
+    # Handle vector input (single sample case)
+    if (is.vector(beta_r) && is.null(dim(beta_r))) {
+        cat("Detected single-sample data (vectors). Converting to matrices...\n")
+        
+        # Get protein names from vector names
+        protein_names <- names(beta_r)
+        if (is.null(protein_names)) {
+            protein_names <- paste0("protein_", seq_along(beta_r))
+            warning("No protein names found. Using auto-generated names.")
+        }
+        
+        # Convert to column matrix (proteins x 1 sample)
+        beta_r   <- matrix(beta_r, ncol = 1, dimnames = list(protein_names, "sample_1"))
+        se_r     <- matrix(se_r, ncol = 1, dimnames = list(protein_names, "sample_1"))
+        zscore_r <- matrix(zscore_r, ncol = 1, dimnames = list(protein_names, "sample_1"))
+        pvalue_r <- matrix(pvalue_r, ncol = 1, dimnames = list(protein_names, "sample_1"))
+    } else {
+        # Matrix input - convert to ensure matrix class
+        beta_r   <- as.matrix(beta_r)
+        se_r     <- as.matrix(se_r)
+        zscore_r <- as.matrix(zscore_r)
+        pvalue_r <- as.matrix(pvalue_r)
+    }
 
     stopifnot(
         "Dimension mismatch between beta and se" = identical(dim(beta_r), dim(se_r)),
@@ -1684,8 +1709,8 @@ write_secact_to_h5ad <- function(obj, output_file = "SecAct_results.h5ad", compr
         warning("No protein names found in rownames(beta). Using auto-generated names.")
     }
     if (is.null(cell_names)) {
-        cell_names <- paste0("cell_", seq_len(ncol(beta_r)))
-        warning("No cell names found in colnames(beta). Using auto-generated names.")
+        cell_names <- paste0("sample_", seq_len(ncol(beta_r)))
+        warning("No sample/cell names found in colnames(beta). Using auto-generated names.")
     }
     
     n_proteins <- nrow(beta_r)
