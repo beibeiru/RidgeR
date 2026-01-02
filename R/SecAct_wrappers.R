@@ -1745,56 +1745,63 @@ write_secact_to_h5ad <- function(obj, output_file = "SecAct_results.h5ad", compr
     ## ----------------------------------------------------------------
     cat("Writing H5AD via Python anndata...\n")
     
-    # Import Python modules
-    anndata <- reticulate::import("anndata", delay_load = FALSE)
-    np <- reticulate::import("numpy", delay_load = FALSE)
-    
-    # Convert R matrices -> numpy arrays (float64)
-    # Use np$atleast_2d to ensure 2D arrays (important for single-sample case)
-    X_np       <- np$atleast_2d(np$array(beta, dtype = np$float64))
-    se_np      <- np$atleast_2d(np$array(se, dtype = np$float64))
-    zscore_np  <- np$atleast_2d(np$array(zscore, dtype = np$float64))
-    pvalue_np  <- np$atleast_2d(np$array(pvalue, dtype = np$float64))
-    
-    # Debug: print shapes
-    cat("  X shape:", paste(X_np$shape, collapse=" x "), "\n")
-    cat("  se shape:", paste(se_np$shape, collapse=" x "), "\n")
-    cat("  zscore shape:", paste(zscore_np$shape, collapse=" x "), "\n")
-    cat("  pvalue shape:", paste(pvalue_np$shape, collapse=" x "), "\n")
-    
-    # Create AnnData object
-    adata <- anndata$AnnData(X = X_np)
-    
-    # Set obs / var names - ensure they are passed as Python lists, not single strings
-    # Use reticulate::r_to_py to properly convert R character vectors to Python lists
-    adata$obs_names <- reticulate::r_to_py(as.list(cell_names))
-    adata$var_names <- reticulate::r_to_py(as.list(protein_names))
-    
-    # Store additional matrices in obsm
-    # Use update method to ensure proper assignment
-    adata$obsm$update(list(
-        se = se_np,
-        zscore = zscore_np,
-        pvalue = pvalue_np
-    ))
-    
-    # Verify obsm was set
-    cat("  obsm keys:", paste(names(adata$obsm), collapse=", "), "\n")
-    
-    # Store metadata
-    adata$uns[["source"]] <- source
-    adata$uns[["data_type"]] <- "SecAct results"
-    adata$uns[["description"]] <- "X=beta, obsm={se,zscore,pvalue}"
-    
     # Remove existing file if present
     if (file.exists(output_file)) file.remove(output_file)
     
-    # Write file (with or without compression)
-    if (!is.null(compression) && compression == "gzip") {
-        adata$write_h5ad(output_file, compression = "gzip")
-    } else {
-        adata$write_h5ad(output_file)
-    }
+    # Use Python directly to avoid reticulate type conversion issues
+    # Pass data to Python environment
+    reticulate::py_run_string("import anndata")
+    reticulate::py_run_string("import numpy as np")
+    
+    # Pass matrices to Python
+    reticulate::py$X_data <- beta
+    reticulate::py$se_data <- se
+    reticulate::py$zscore_data <- zscore
+    reticulate::py$pvalue_data <- pvalue
+    reticulate::py$cell_names <- as.list(cell_names)
+    reticulate::py$protein_names <- as.list(protein_names)
+    reticulate::py$output_file <- output_file
+    reticulate::py$source_info <- source
+    reticulate::py$use_compression <- !is.null(compression) && compression == "gzip"
+    
+    # Run Python code to create and save AnnData
+    reticulate::py_run_string("
+# Convert to numpy arrays and ensure 2D
+X_np = np.atleast_2d(np.array(X_data, dtype=np.float64))
+se_np = np.atleast_2d(np.array(se_data, dtype=np.float64))
+zscore_np = np.atleast_2d(np.array(zscore_data, dtype=np.float64))
+pvalue_np = np.atleast_2d(np.array(pvalue_data, dtype=np.float64))
+
+print(f'  X shape: {X_np.shape}')
+print(f'  se shape: {se_np.shape}')
+print(f'  zscore shape: {zscore_np.shape}')
+print(f'  pvalue shape: {pvalue_np.shape}')
+
+# Create AnnData
+adata = anndata.AnnData(X=X_np)
+
+# Set names
+adata.obs_names = cell_names
+adata.var_names = protein_names
+
+# Add obsm
+adata.obsm['se'] = se_np
+adata.obsm['zscore'] = zscore_np
+adata.obsm['pvalue'] = pvalue_np
+
+print(f'  obsm keys: {list(adata.obsm.keys())}')
+
+# Add metadata
+adata.uns['source'] = source_info
+adata.uns['data_type'] = 'SecAct results'
+adata.uns['description'] = 'X=beta, obsm={se,zscore,pvalue}'
+
+# Write file
+if use_compression:
+    adata.write_h5ad(output_file, compression='gzip')
+else:
+    adata.write_h5ad(output_file)
+")
 
     cat("\nDONE\n")
     cat("File size:", sprintf("%.2f MB", file.info(output_file)$size / 1e6), "\n")
