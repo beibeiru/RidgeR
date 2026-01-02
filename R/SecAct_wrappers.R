@@ -1750,10 +1750,17 @@ write_secact_to_h5ad <- function(obj, output_file = "SecAct_results.h5ad", compr
     np <- reticulate::import("numpy", delay_load = FALSE)
     
     # Convert R matrices -> numpy arrays (float64)
-    X_np       <- np$array(beta, dtype = np$float64)
-    se_np      <- np$array(se, dtype = np$float64)
-    zscore_np  <- np$array(zscore, dtype = np$float64)
-    pvalue_np  <- np$array(pvalue, dtype = np$float64)
+    # Use np$atleast_2d to ensure 2D arrays (important for single-sample case)
+    X_np       <- np$atleast_2d(np$array(beta, dtype = np$float64))
+    se_np      <- np$atleast_2d(np$array(se, dtype = np$float64))
+    zscore_np  <- np$atleast_2d(np$array(zscore, dtype = np$float64))
+    pvalue_np  <- np$atleast_2d(np$array(pvalue, dtype = np$float64))
+    
+    # Debug: print shapes
+    cat("  X shape:", paste(X_np$shape, collapse=" x "), "\n")
+    cat("  se shape:", paste(se_np$shape, collapse=" x "), "\n")
+    cat("  zscore shape:", paste(zscore_np$shape, collapse=" x "), "\n")
+    cat("  pvalue shape:", paste(pvalue_np$shape, collapse=" x "), "\n")
     
     # Create AnnData object
     adata <- anndata$AnnData(X = X_np)
@@ -1764,9 +1771,15 @@ write_secact_to_h5ad <- function(obj, output_file = "SecAct_results.h5ad", compr
     adata$var_names <- reticulate::r_to_py(as.list(protein_names))
     
     # Store additional matrices in obsm
-    adata$obsm[["se"]]     <- se_np
-    adata$obsm[["zscore"]] <- zscore_np
-    adata$obsm[["pvalue"]] <- pvalue_np
+    # Use update method to ensure proper assignment
+    adata$obsm$update(list(
+        se = se_np,
+        zscore = zscore_np,
+        pvalue = pvalue_np
+    ))
+    
+    # Verify obsm was set
+    cat("  obsm keys:", paste(names(adata$obsm), collapse=", "), "\n")
     
     # Store metadata
     adata$uns[["source"]] <- source
