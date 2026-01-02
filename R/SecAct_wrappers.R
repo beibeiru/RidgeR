@@ -1662,14 +1662,14 @@ write_secact_to_h5ad <- function(obj, output_file = "SecAct_results.h5ad", compr
 
     ## ----------------------------------------------------------------
     ## 2. Extract matrices (R format: proteins x cells)
-    ##    Handle both matrix and vector (single sample) inputs
+    ##    Handle vector, 1-column matrix, and multi-column matrix inputs
     ## ----------------------------------------------------------------
     beta_r   <- res$beta
     se_r     <- res$se
     zscore_r <- res$zscore
     pvalue_r <- res$pvalue
 
-    # Handle vector input (single sample case)
+    # Handle vector input (single sample case - no dim attribute)
     if (is.vector(beta_r) && is.null(dim(beta_r))) {
         cat("Detected single-sample data (vectors). Converting to matrices...\n")
         
@@ -1686,11 +1686,20 @@ write_secact_to_h5ad <- function(obj, output_file = "SecAct_results.h5ad", compr
         zscore_r <- matrix(zscore_r, ncol = 1, dimnames = list(protein_names, "sample_1"))
         pvalue_r <- matrix(pvalue_r, ncol = 1, dimnames = list(protein_names, "sample_1"))
     } else {
-        # Matrix input - convert to ensure matrix class
+        # Convert to matrix
         beta_r   <- as.matrix(beta_r)
         se_r     <- as.matrix(se_r)
         zscore_r <- as.matrix(zscore_r)
         pvalue_r <- as.matrix(pvalue_r)
+        
+        # Handle 1-column matrix with no colnames (single sample stored as matrix)
+        if (ncol(beta_r) == 1 && is.null(colnames(beta_r))) {
+            cat("Detected single-sample data (1-column matrix). Setting sample name...\n")
+            colnames(beta_r)   <- "sample_1"
+            colnames(se_r)     <- "sample_1"
+            colnames(zscore_r) <- "sample_1"
+            colnames(pvalue_r) <- "sample_1"
+        }
     }
 
     stopifnot(
@@ -1749,9 +1758,10 @@ write_secact_to_h5ad <- function(obj, output_file = "SecAct_results.h5ad", compr
     # Create AnnData object
     adata <- anndata$AnnData(X = X_np)
     
-    # Set obs / var names
-    adata$obs_names <- cell_names
-    adata$var_names <- protein_names
+    # Set obs / var names - ensure they are passed as Python lists, not single strings
+    # Use reticulate::r_to_py to properly convert R character vectors to Python lists
+    adata$obs_names <- reticulate::r_to_py(as.list(cell_names))
+    adata$var_names <- reticulate::r_to_py(as.list(protein_names))
     
     # Store additional matrices in obsm
     adata$obsm[["se"]]     <- se_np
