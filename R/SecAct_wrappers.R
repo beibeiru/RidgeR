@@ -1761,8 +1761,9 @@ write_secact_to_h5ad <- function(obj, output_file = "SecAct_results.h5ad", compr
     py_main$se_data <- se
     py_main$zscore_data <- zscore
     py_main$pvalue_data <- pvalue
-    py_main$cell_names <- cell_names
-    py_main$protein_names <- protein_names
+    # Force as list to prevent single strings from being iterated as characters
+    py_main$cell_names <- as.list(cell_names)
+    py_main$protein_names <- as.list(protein_names)
     py_main$output_file <- output_file
     py_main$source_info <- source
     py_main$use_compression <- !is.null(compression) && compression == "gzip"
@@ -1790,9 +1791,25 @@ print(f'  pvalue shape: {pvalue_np.shape}')
 # Create AnnData
 adata = anndata.AnnData(X=X_np)
 
+# Handle cell_names - might be string (single sample) or list
+# Reticulate sometimes converts single-element R lists to Python scalars
+if isinstance(cell_names, str):
+    cell_names_list = [cell_names]
+else:
+    cell_names_list = [str(x) for x in list(cell_names)]
+
+# Handle protein_names similarly
+if isinstance(protein_names, str):
+    protein_names_list = [protein_names]
+else:
+    protein_names_list = [str(x) for x in list(protein_names)]
+
+print(f'  cell_names ({len(cell_names_list)}): {cell_names_list[:3]}...')
+print(f'  protein_names ({len(protein_names_list)}): {protein_names_list[:3]}...')
+
 # Set dimension names
-adata.obs_names = [str(x) for x in cell_names]
-adata.var_names = [str(x) for x in protein_names]
+adata.obs_names = cell_names_list
+adata.var_names = protein_names_list
 
 # Add obsm
 adata.obsm['se'] = se_np
