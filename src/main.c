@@ -10,7 +10,10 @@
 #include <math.h>   // for sqrt, fabs
 
 #ifdef _OPENMP
-  #include <omp.h>    // for OpenMP
+  #undef match        // R's Rinternals.h defines match as Rf_match, which
+                      // conflicts with OpenMP's "match" clause in omp.h
+  #include <omp.h>
+  #define match Rf_match
 #endif
 
 // --- TUNING ---
