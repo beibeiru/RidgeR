@@ -103,6 +103,28 @@ cat("naive:", t_naive[3], "Yrow.st:", t_yrow_st[3], "Tcol.st:", t_tcol_st[3],
     "Yrow.mt:", t_yrow_mt[3], "Tcol.mt:", t_tcol_mt[3], "\n")
 ```
 
+## Compatibility with R SecAct
+
+RidgeR's `is.group.sig` parameter controls signature grouping. The original
+[R SecAct](https://github.com/data2intelligence/SecAct) package has different
+functions with and without grouping:
+
+| R SecAct Function | Grouping | RidgeR Equivalent |
+|---|---|---|
+| `SecAct.inference.gsl` | No | `SecAct.inference.gsl.new(Y, is.group.sig = FALSE)` |
+| `SecAct.activity.inference(Y, is.differential = TRUE)` | Yes (default) | `SecAct.inference.gsl.new(Y, is.group.sig = TRUE)` |
+
+``` r
+# Match SecAct.inference.gsl (no grouping)
+res <- SecAct.inference.gsl.new(expr.diff, is.group.sig = FALSE)
+
+# Match SecAct.activity.inference (with grouping, default)
+res <- SecAct.inference.gsl.new(expr.diff, is.group.sig = TRUE)
+```
+
+Verified equivalence (max |zscore diff| < 5e-14, correlation = 1.0) for both
+cases against the original R SecAct package.
+
 ## Reproducibility
 
 RidgeR supports two RNG backends via the `rng_method` parameter:
