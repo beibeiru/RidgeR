@@ -22,10 +22,22 @@ The package has been installed successfully on Operating Systems:
 
 ## Functions
 
-| Function | Description |
-|----------|-------------|
-| `SecAct.inference.gsl.old` | Single-threaded ridge regression (legacy `.C` interface, 32-bit indexing) |
-| `SecAct.inference.gsl.new` | Multi-threaded ridge regression (`.Call` interface, 64-bit indexing) |
+| # | Function | Permutation | Threading | Interface | Description |
+|---|----------|-------------|-----------|-----------|-------------|
+| 1 | `SecAct.inference.naive` | T-col (pure R) | Single (R) | `.Call` (perm table only) | Pure R reference implementation |
+| 2 | `SecAct.inference.Yrow.st` | Y-row | Single | `.Call` (ncores=1) | Single-threaded Y-row permutation |
+| 3 | `SecAct.inference.Tcol.st` | T-col | Single | `.Call` (ncores=1) | Single-threaded T-col permutation |
+| 4 | `SecAct.inference.Yrow.mt` | Y-row | Multi (OMP) | `.Call` | Multi-threaded Y-row permutation |
+| 5 | `SecAct.inference.Tcol.mt` | T-col | Multi (OMP) | `.Call` | Multi-threaded T-col permutation |
+| — | `SecAct.inference.gsl.old` | Y-row | Single | `.C` (legacy, 32-bit) | Legacy single-threaded (preserved) |
+| — | `SecAct.inference.gsl.new` | Y-row | Multi (OMP) | `.Call` (64-bit) | Legacy multi-threaded (preserved) |
+
+**Permutation strategies:**
+
+- **Y-row**: Permutes rows of the response matrix Y, then multiplies T * Y_perm. Parallelizes over sample strips.
+- **T-col**: Permutes columns of the projection matrix T, then multiplies T_perm * Y. Mathematically equivalent (`T[:, inv_perm] @ Y == T @ Y[perm, :]`). Parallelizes over permutations. Matches [SecActPy](https://github.com/data2intelligence/SecActpy) approach.
+
+**Legacy aliases:** `gsl.old` and `gsl.new` are preserved for backward compatibility. `gsl.new` is functionally identical to `Yrow.mt`.
 
 ### Key Parameters
 
@@ -35,7 +47,7 @@ The package has been installed successfully on Operating Systems:
 | `SigMat` | `"SecAct"` | Signature matrix: `"SecAct"` (bundled) or path to file |
 | `lambda` | `5e+05` | Ridge regularization parameter |
 | `nrand` | `1000` | Number of permutations |
-| `ncores` | `NULL` | Number of CPU cores (`NULL` = auto-detect; `SecAct.inference.gsl.new` only) |
+| `ncores` | `NULL` | Number of CPU cores (`NULL` = auto-detect; multi-threaded variants only) |
 | `rng_method` | `"srand"` | RNG backend: `"srand"` (C stdlib, matches R SecAct) or `"gsl"` (cross-platform GSL MT19937) |
 | `is.group.sig` | `TRUE` | Group correlated signatures before regression |
 | `is.group.cor` | `0.9` | Correlation threshold for signature grouping |
@@ -45,26 +57,24 @@ The package has been installed successfully on Operating Systems:
 ``` r
 library(RidgeR)
 
-# ---- Load example data ----
-dataPath <- file.path(system.file(package = "RidgeR"), "extdata")
-expr.diff <- read.table(paste0(dataPath, "/Ly86-Fc_vs_Vehicle_logFC.txt"))
+dataPath <- file.path(system.file(package = "RidgeR"), "extdata/")
+expr.diff <- read.table(paste0(dataPath, "Ly86-Fc_vs_Vehicle_logFC.txt"))
 
-# ---- Compare execution time between single-threaded and multi-threaded functions ----
-t_old <- system.time({res.old <- SecAct.inference.gsl.old(expr.diff)})
-t_new <- system.time({res.new <- SecAct.inference.gsl.new(expr.diff)})
-print(t_old); print(t_new)
+# ---- Compare all variants ----
+t_naive   <- system.time({res.naive   <- SecAct.inference.naive(expr.diff)})
+t_yrow_st <- system.time({res.yrow.st <- SecAct.inference.Yrow.st(expr.diff)})
+t_tcol_st <- system.time({res.tcol.st <- SecAct.inference.Tcol.st(expr.diff)})
+t_yrow_mt <- system.time({res.yrow.mt <- SecAct.inference.Yrow.mt(expr.diff)})
+t_tcol_mt <- system.time({res.tcol.mt <- SecAct.inference.Tcol.mt(expr.diff)})
 
-# ---- Compare output: head of z-scores ----
-print(head(res.old$zscore))
-print(head(res.new$zscore))
+# ---- Verify equivalence (all should be ~0) ----
+cat("naive  vs Tcol.st:", max(abs(res.naive$zscore - res.tcol.st$zscore)), "\n")
+cat("Yrow.st vs Yrow.mt:", max(abs(res.yrow.st$zscore - res.yrow.mt$zscore)), "\n")
+cat("Tcol.st vs Tcol.mt:", max(abs(res.tcol.st$zscore - res.tcol.mt$zscore)), "\n")
 
-# ---- summarize differences ----
-diff <- res.new$zscore - res.old$zscore
-print(summary(diff))
-
-# ---- correlation ----
-corr <- cor(res.new$zscore, res.old$zscore)
-print(corr)
+# ---- Elapsed times ----
+cat("naive:", t_naive[3], "Yrow.st:", t_yrow_st[3], "Tcol.st:", t_tcol_st[3],
+    "Yrow.mt:", t_yrow_mt[3], "Tcol.mt:", t_tcol_mt[3], "\n")
 ```
 
 ## Reproducibility
@@ -78,10 +88,10 @@ RidgeR supports two RNG backends via the `rng_method` parameter:
 
 ``` r
 # Default: match R SecAct on same platform (C stdlib rand, platform-dependent)
-res <- SecAct.inference.gsl.new(expr.diff, rng_method = "srand")
+res <- SecAct.inference.Yrow.mt(expr.diff, rng_method = "srand")
 
 # Cross-platform: matches SecActPy rng_method='gsl' on any OS
-res <- SecAct.inference.gsl.new(expr.diff, rng_method = "gsl")
+res <- SecAct.inference.Yrow.mt(expr.diff, rng_method = "gsl")
 ```
 
 > **Note:** C `rand()` implementations differ across operating systems, so

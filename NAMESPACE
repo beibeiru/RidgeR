@@ -1,4 +1,9 @@
 
-export(SecAct.inference.gsl.new)
 export(SecAct.inference.gsl.old)
+export(SecAct.inference.gsl.new)
+export(SecAct.inference.naive)
+export(SecAct.inference.Yrow.st)
+export(SecAct.inference.Yrow.mt)
+export(SecAct.inference.Tcol.st)
+export(SecAct.inference.Tcol.mt)
 useDynLib(RidgeR, .registration=TRUE)
