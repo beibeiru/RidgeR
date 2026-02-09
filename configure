@@ -1,46 +1,179 @@
 #!/bin/sh
 
-# Detect GSL
-if command -v gsl-config > /dev/null 2>&1; then
-  GSL_CFLAGS=$(gsl-config --cflags)
-  GSL_LIBS=$(gsl-config --libs)
-else
-  echo "ERROR: gsl-config not found. Please install GSL."
-  echo "  macOS:  brew install gsl"
-  echo "  Linux:  sudo apt-get install libgsl-dev  (or yum install gsl-devel)"
-  exit 1
+# ===========================================================================
+# 1. GSL DETECTION
+# ===========================================================================
+echo "Checking for GSL..."
+
+GSL_CONFIG_EXEC="gsl-config"
+if ! command -v "$GSL_CONFIG_EXEC" >/dev/null 2>&1; then
+    if [ -x "/opt/homebrew/bin/gsl-config" ]; then
+        GSL_CONFIG_EXEC="/opt/homebrew/bin/gsl-config"
+    elif [ -x "/usr/local/bin/gsl-config" ]; then
+        GSL_CONFIG_EXEC="/usr/local/bin/gsl-config"
+    elif [ -x "/opt/local/bin/gsl-config" ]; then
+        GSL_CONFIG_EXEC="/opt/local/bin/gsl-config"
+    fi
 fi
 
-# Get R's CC
-CC=$("${R_HOME}/bin/R" CMD config CC 2>/dev/null || echo "cc")
+if ! "$GSL_CONFIG_EXEC" --version >/dev/null 2>&1; then
+    echo "ERROR: GSL is not installed or gsl-config is not found."
+    exit 1
+fi
 
-# Detect OpenMP support
-OPENMP_CFLAGS=""
-OPENMP_LIBS=""
+GSL_CFLAGS=$("$GSL_CONFIG_EXEC" --cflags)
+GSL_LIBS=$("$GSL_CONFIG_EXEC" --libs)
 
-case "$(uname -s)" in
-  Darwin)
-    # macOS: Apple Clang + Homebrew libomp has known runtime incompatibilities
-    # (e.g. missing ___kmpc_dispatch_deinit with clang 17). Disable OpenMP;
-    # all functions work single-threaded via #ifdef _OPENMP guards.
-    echo "NOTE: macOS detected. Building without OpenMP (single-threaded)."
-    ;;
-  *)
-    # Linux / other: gcc supports -fopenmp natively
-    OPENMP_CFLAGS="-fopenmp"
-    OPENMP_LIBS="-fopenmp"
-    ;;
-esac
+# ===========================================================================
+# 2. OPENMP DETECTION
+# ===========================================================================
+echo "Checking for OpenMP support..."
 
-# Generate Makevars from template
-sed -e "s|@GSL_CFLAGS@|${GSL_CFLAGS}|g" \
-    -e "s|@GSL_LIBS@|${GSL_LIBS}|g" \
-    -e "s|@OPENMP_CFLAGS@|${OPENMP_CFLAGS}|g" \
-    -e "s|@OPENMP_LIBS@|${OPENMP_LIBS}|g" \
-    src/Makevars.in > src/Makevars
+OMP_CFLAGS=""
+OMP_LIBS=""
+OVERRIDE_LDFLAGS=""
+OS=$(uname -s)
+R_CC=$(R CMD config CC 2>/dev/null)
+[ -z "$R_CC" ] && R_CC="gcc"
 
-echo "Configuration complete."
-echo "  GSL_CFLAGS:    ${GSL_CFLAGS}"
-echo "  GSL_LIBS:      ${GSL_LIBS}"
-echo "  OPENMP_CFLAGS: ${OPENMP_CFLAGS:-<disabled>}"
-echo "  OPENMP_LIBS:   ${OPENMP_LIBS:-<disabled>}"
+# ---------------------------------------------------------------------------
+# Debugging Function: test_openmp
+# ---------------------------------------------------------------------------
+test_openmp() {
+    TEST_CFLAGS="$1"
+    TEST_LIBS="$2"
+    LABEL="$3"
+
+    TMPDIR=$(mktemp -d 2>/dev/null || mktemp -d -t 'openmptest')
+    TESTFILE="$TMPDIR/test_omp.c"
+    TESTOUT="$TMPDIR/test_omp"
+    ERRLOG="$TMPDIR/error.log"
+
+    cat > "$TESTFILE" <<EOF
+#include <omp.h>
+#include <stdio.h>
+int main() {
+    #pragma omp parallel
+    { }
+    return 0;
+}
+EOF
+
+    $R_CC $TEST_CFLAGS -o "$TESTOUT" "$TESTFILE" $TEST_LIBS > "$ERRLOG" 2>&1
+    RESULT=$?
+
+    if [ $RESULT -ne 0 ]; then
+        echo "  [Debug] $LABEL check failed. Compiler output:"
+        sed 's/^/    /' "$ERRLOG"
+    fi
+
+    rm -rf "$TMPDIR"
+    return $RESULT
+}
+
+# ---------------------------------------------------------------------------
+# Platform Logic
+# ---------------------------------------------------------------------------
+
+if [ "$OS" = "Darwin" ]; then
+    # --- macOS Logic ---
+
+    # 1. Define Candidates
+
+    # Candidate A: Homebrew Apple Silicon
+    CAND_A_CFLAGS="-Xpreprocessor -fopenmp -I/opt/homebrew/opt/libomp/include -include omp.h"
+    CAND_A_LIBS="/opt/homebrew/opt/libomp/lib/libomp.dylib"
+    CAND_A_LDFLAGS="-L/opt/homebrew/opt/libomp/lib"
+
+    # Candidate B: Homebrew Intel
+    CAND_B_CFLAGS="-Xpreprocessor -fopenmp -I/usr/local/opt/libomp/include -include omp.h"
+    CAND_B_LIBS="/usr/local/opt/libomp/lib/libomp.dylib"
+    CAND_B_LDFLAGS="-L/usr/local/opt/libomp/lib"
+
+    # Candidate C: LLVM
+    CAND_C_CFLAGS="-fopenmp -I/opt/homebrew/opt/llvm/include"
+    CAND_C_LIBS="/opt/homebrew/opt/llvm/lib/libomp.dylib -Wl,-rpath,/opt/homebrew/opt/llvm/lib"
+    CAND_C_LDFLAGS="-L/opt/homebrew/opt/llvm/lib"
+
+    # 2. Run Tests
+
+    if test_openmp "$CAND_A_CFLAGS" "$CAND_A_LIBS" "Apple Silicon"; then
+        echo "  Detected OpenMP: Homebrew (Apple Silicon)"
+        OMP_CFLAGS="$CAND_A_CFLAGS"
+        OMP_LIBS="$CAND_A_LIBS -Wl,-rpath,/opt/homebrew/opt/libomp/lib"
+        OVERRIDE_LDFLAGS="$CAND_A_LDFLAGS"
+
+    elif test_openmp "$CAND_B_CFLAGS" "$CAND_B_LIBS" "Intel Mac"; then
+        echo "  Detected OpenMP: Homebrew (Intel)"
+        OMP_CFLAGS="$CAND_B_CFLAGS"
+        OMP_LIBS="$CAND_B_LIBS -Wl,-rpath,/usr/local/opt/libomp/lib"
+        OVERRIDE_LDFLAGS="$CAND_B_LDFLAGS"
+
+    elif test_openmp "$CAND_C_CFLAGS" "$CAND_C_LIBS" "LLVM"; then
+        echo "  Detected OpenMP: Homebrew LLVM"
+        OMP_CFLAGS="$CAND_C_CFLAGS"
+        OMP_LIBS="$CAND_C_LIBS"
+        OVERRIDE_LDFLAGS="$CAND_C_LDFLAGS"
+
+    else
+        # Fallback
+        R_DEF_CFLAGS=$(R CMD config SHLIB_OPENMP_CFLAGS 2>/dev/null)
+        if [ -n "$R_DEF_CFLAGS" ]; then
+             echo "  Trying R Defaults ($R_DEF_CFLAGS)..."
+             R_DEF_CFLAGS="$R_DEF_CFLAGS -include omp.h"
+
+             if test_openmp "$R_DEF_CFLAGS" "$R_DEF_CFLAGS" "R-Defaults"; then
+                 echo "  Detected OpenMP: R Defaults"
+                 OMP_CFLAGS="$R_DEF_CFLAGS"
+                 OMP_LIBS="$R_DEF_CFLAGS"
+             fi
+        fi
+    fi
+
+else
+    # --- Linux Logic ---
+    R_OMP_CFLAGS=$(R CMD config SHLIB_OPENMP_CFLAGS 2>/dev/null)
+    case "$R_OMP_CFLAGS" in *ERROR*|*error*) R_OMP_CFLAGS="";; esac
+
+    if [ -n "$R_OMP_CFLAGS" ] && test_openmp "$R_OMP_CFLAGS" "$R_OMP_CFLAGS" "Linux R-Def"; then
+        OMP_CFLAGS="$R_OMP_CFLAGS"
+        OMP_LIBS="$R_OMP_CFLAGS"
+    elif test_openmp "-fopenmp" "-fopenmp" "Linux GCC"; then
+        OMP_CFLAGS="-fopenmp"
+        OMP_LIBS="-fopenmp"
+    fi
+fi
+
+# ===========================================================================
+# 3. WRITE MAKEVARS
+# ===========================================================================
+mkdir -p src
+
+cat > src/Makevars <<EOF
+## Automatically generated by configure
+PKG_CFLAGS = $OMP_CFLAGS $GSL_CFLAGS
+PKG_LIBS = $OMP_LIBS $GSL_LIBS
+EOF
+
+if [ -n "$OVERRIDE_LDFLAGS" ]; then
+    cat >> src/Makevars <<EOF
+
+# Override to prioritize the correct OpenMP library path
+LDFLAGS = $OVERRIDE_LDFLAGS
+EOF
+fi
+
+# ===========================================================================
+# 4. FINAL STATUS REPORT
+# ===========================================================================
+echo ""
+echo "-------------------------------"
+echo "  RidgeR Configuration Summary "
+echo "-------------------------------"
+if [ -n "$OMP_CFLAGS" ]; then
+    echo "  OpenMP Status:   ENABLED"
+else
+    echo "  OpenMP Status:   DISABLED"
+fi
+echo "-------------------------------"
+echo ""
