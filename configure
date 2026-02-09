@@ -1,0 +1,53 @@
+#!/bin/sh
+
+# Detect GSL
+if command -v gsl-config > /dev/null 2>&1; then
+  GSL_CFLAGS=$(gsl-config --cflags)
+  GSL_LIBS=$(gsl-config --libs)
+else
+  echo "ERROR: gsl-config not found. Please install GSL."
+  echo "  macOS:  brew install gsl"
+  echo "  Linux:  sudo apt-get install libgsl-dev  (or yum install gsl-devel)"
+  exit 1
+fi
+
+# Detect OpenMP support
+OPENMP_CFLAGS=""
+OPENMP_LIBS=""
+
+case "$(uname -s)" in
+  Darwin)
+    # macOS: Apple Clang needs -Xclang -fopenmp and libomp
+    if [ -d "/opt/homebrew/opt/libomp" ]; then
+      LIBOMP_PREFIX="/opt/homebrew/opt/libomp"
+    elif [ -d "/usr/local/opt/libomp" ]; then
+      LIBOMP_PREFIX="/usr/local/opt/libomp"
+    else
+      echo "NOTE: libomp not found. Building without OpenMP (single-threaded)."
+      echo "  To enable multi-threading: brew install libomp"
+      LIBOMP_PREFIX=""
+    fi
+    if [ -n "$LIBOMP_PREFIX" ]; then
+      OPENMP_CFLAGS="-Xclang -fopenmp -I${LIBOMP_PREFIX}/include"
+      OPENMP_LIBS="-L${LIBOMP_PREFIX}/lib -lomp"
+    fi
+    ;;
+  *)
+    # Linux / other: gcc supports -fopenmp natively
+    OPENMP_CFLAGS="-fopenmp"
+    OPENMP_LIBS="-fopenmp"
+    ;;
+esac
+
+# Generate Makevars from template
+sed -e "s|@GSL_CFLAGS@|${GSL_CFLAGS}|g" \
+    -e "s|@GSL_LIBS@|${GSL_LIBS}|g" \
+    -e "s|@OPENMP_CFLAGS@|${OPENMP_CFLAGS}|g" \
+    -e "s|@OPENMP_LIBS@|${OPENMP_LIBS}|g" \
+    src/Makevars.in > src/Makevars
+
+echo "Configuration complete."
+echo "  GSL_CFLAGS:    ${GSL_CFLAGS}"
+echo "  GSL_LIBS:      ${GSL_LIBS}"
+echo "  OPENMP_CFLAGS: ${OPENMP_CFLAGS:-<disabled>}"
+echo "  OPENMP_LIBS:   ${OPENMP_LIBS:-<disabled>}"
