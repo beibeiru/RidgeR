@@ -22,6 +22,19 @@ The package has been installed successfully on Operating Systems:
 
 ## Functions
 
+### Main function
+
+`SecAct.inference.gsl.new` is the primary interface. It dispatches to one of 4 optimized C backends via the `method` parameter:
+
+``` r
+SecAct.inference.gsl.new(Y, method = "Tcol.mt")  # default: T-col, multi-threaded
+SecAct.inference.gsl.new(Y, method = "Tcol.st")  # T-col, single-threaded
+SecAct.inference.gsl.new(Y, method = "Yrow.mt")  # Y-row, multi-threaded
+SecAct.inference.gsl.new(Y, method = "Yrow.st")  # Y-row, single-threaded
+```
+
+### All variants
+
 | # | Function | Permutation | Threading | Interface | Description |
 |---|----------|-------------|-----------|-----------|-------------|
 | 1 | `SecAct.inference.naive` | T-col (pure R) | Single (R) | `.Call` (perm table only) | Pure R reference implementation |
@@ -30,14 +43,14 @@ The package has been installed successfully on Operating Systems:
 | 4 | `SecAct.inference.Yrow.mt` | Y-row | Multi (OMP) | `.Call` | Multi-threaded Y-row permutation |
 | 5 | `SecAct.inference.Tcol.mt` | T-col | Multi (OMP) | `.Call` | Multi-threaded T-col permutation |
 | — | `SecAct.inference.gsl.old` | Y-row | Single | `.C` (legacy, 32-bit) | Legacy single-threaded (preserved) |
-| — | `SecAct.inference.gsl.new` | Y-row | Multi (OMP) | `.Call` (64-bit) | Legacy multi-threaded (preserved) |
+| — | `SecAct.inference.gsl.new` | Dispatches | Dispatches | `.Call` (64-bit) | Dispatcher (default: `method="Tcol.mt"`) |
 
 **Permutation strategies:**
 
 - **Y-row**: Permutes rows of the response matrix Y, then multiplies T * Y_perm. Parallelizes over sample strips.
 - **T-col**: Permutes columns of the projection matrix T, then multiplies T_perm * Y. Mathematically equivalent (`T[:, inv_perm] @ Y == T @ Y[perm, :]`). Parallelizes over permutations. Matches [SecActPy](https://github.com/data2intelligence/SecActpy) approach.
 
-**Legacy aliases:** `gsl.old` and `gsl.new` are preserved for backward compatibility. `gsl.new` is functionally identical to `Yrow.mt`.
+**Legacy:** `gsl.old` is preserved for backward compatibility. `gsl.new` now dispatches to the 4 variants (previously it was Y-row multi-threaded only).
 
 ### Key Parameters
 
@@ -49,6 +62,7 @@ The package has been installed successfully on Operating Systems:
 | `nrand` | `1000` | Number of permutations |
 | `ncores` | `NULL` | Number of CPU cores (`NULL` = auto-detect; multi-threaded variants only) |
 | `rng_method` | `"srand"` | RNG backend: `"srand"` (C stdlib, matches R SecAct) or `"gsl"` (cross-platform GSL MT19937) |
+| `method` | `"Tcol.mt"` | Backend variant: `"Tcol.mt"`, `"Tcol.st"`, `"Yrow.mt"`, or `"Yrow.st"` (`gsl.new` only) |
 | `is.group.sig` | `TRUE` | Group correlated signatures before regression |
 | `is.group.cor` | `0.9` | Correlation threshold for signature grouping |
 
