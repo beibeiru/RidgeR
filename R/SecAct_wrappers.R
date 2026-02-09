@@ -1,3 +1,25 @@
+#' @keywords internal
+group_signatures <- function(X, cor_threshold = 0.9) {
+  dis <- as.dist(1 - cor(X, method = "pearson"))
+  hc <- hclust(dis, method = "complete")
+  group_labels <- cutree(hc, h = 1 - cor_threshold)
+  newsig <- data.frame(row.names = rownames(X))
+  for (j in unique(group_labels)) {
+    geneGroups <- names(group_labels)[group_labels == j]
+    newsig[, paste0(geneGroups, collapse = "|")] <- rowMeans(X[, geneGroups, drop = FALSE])
+  }
+  as.data.frame(newsig)
+}
+
+#' @keywords internal
+expand_rows <- function(mat) {
+  new_rows <- lapply(1:nrow(mat), function(i) {
+    names <- strsplit(rownames(mat)[i], "\\|")[[1]]
+    `rownames<-`(do.call(rbind, replicate(length(names), mat[i, , drop = FALSE], simplify = FALSE)), names)
+  })
+  do.call(rbind, new_rows)
+}
+
 #' @title Secreted protein activity inference (Legacy Version)
 #' @description Old single-threaded implementation.
 #' @param Y Gene expression matrix.
@@ -6,14 +28,21 @@
 #' @param nrand Number of randomizations.
 #' @param rng_method RNG method: "srand" (default, platform-dependent C stdlib rand)
 #'   or "gsl" (cross-platform GSL MT19937, matches SecActPy GSLRNG).
+#' @param is.group.sig Logical; group correlated signatures before regression (default TRUE).
+#' @param is.group.cor Correlation threshold for grouping (default 0.9).
 #' @export
-SecAct.inference.gsl.old <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=1000, rng_method="srand")
+SecAct.inference.gsl.old <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=1000, rng_method="srand",
+                                     is.group.sig=TRUE, is.group.cor=0.9)
 {
   if(SigMat=="SecAct") {
-    Xfile<- file.path(system.file(package = "SecAct"), "extdata/AllSigFilteredBy_MoranI_TCGA_ICGC_0.25_ds3.tsv.gz")
+    Xfile<- file.path(system.file(package = "SecAct"), "extdata/SecAct.tsv.gz")
     X <- read.table(Xfile,sep="\t",check.names=F)
   } else {
     X <- read.table(SigMat,sep="\t",check.names=F)
+  }
+
+  if (is.group.sig) {
+    X <- group_signatures(X, cor_threshold = is.group.cor)
   }
 
   rng_int <- match.arg(rng_method, c("srand", "gsl"))
@@ -37,7 +66,21 @@ SecAct.inference.gsl.old <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=100
   )
 
   formatter <- function(v) matrix(v, byrow=T, ncol=m, dimnames=list(colnames(X), colnames(Y)))
-  list(beta=formatter(res$beta), se=formatter(res$se), zscore=formatter(res$zscore), pvalue=formatter(res$pvalue))
+  result <- list(beta=formatter(res$beta), se=formatter(res$se), zscore=formatter(res$zscore), pvalue=formatter(res$pvalue))
+
+  if (is.group.sig) {
+    result$beta   <- expand_rows(result$beta)
+    result$se     <- expand_rows(result$se)
+    result$zscore <- expand_rows(result$zscore)
+    result$pvalue <- expand_rows(result$pvalue)
+    ord <- sort(rownames(result$beta))
+    result$beta   <- result$beta[ord, , drop = FALSE]
+    result$se     <- result$se[ord, , drop = FALSE]
+    result$zscore <- result$zscore[ord, , drop = FALSE]
+    result$pvalue <- result$pvalue[ord, , drop = FALSE]
+  }
+
+  result
 }
 
 #' @title Secreted protein activity inference (Optimized Version)
@@ -49,14 +92,21 @@ SecAct.inference.gsl.old <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=100
 #' @param ncores Number of cores (default: all available).
 #' @param rng_method RNG method: "srand" (default, platform-dependent C stdlib rand)
 #'   or "gsl" (cross-platform GSL MT19937, matches SecActPy GSLRNG).
+#' @param is.group.sig Logical; group correlated signatures before regression (default TRUE).
+#' @param is.group.cor Correlation threshold for grouping (default 0.9).
 #' @export
-SecAct.inference.gsl.new <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=1000, ncores=NULL, rng_method="srand")
+SecAct.inference.gsl.new <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=1000, ncores=NULL, rng_method="srand",
+                                     is.group.sig=TRUE, is.group.cor=0.9)
 {
   if(SigMat=="SecAct") {
-    Xfile<- file.path(system.file(package = "SecAct"), "extdata/AllSigFilteredBy_MoranI_TCGA_ICGC_0.25_ds3.tsv.gz")
+    Xfile<- file.path(system.file(package = "SecAct"), "extdata/SecAct.tsv.gz")
     X <- read.table(Xfile,sep="\t",check.names=F)
   } else {
     X <- read.table(SigMat,sep="\t",check.names=F)
+  }
+
+  if (is.group.sig) {
+    X <- group_signatures(X, cor_threshold = is.group.cor)
   }
 
   rng_int <- match.arg(rng_method, c("srand", "gsl"))
@@ -96,5 +146,19 @@ SecAct.inference.gsl.new <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=100
     return(v)
   }
 
-  list(beta=formatter(res$beta), se=formatter(res$se), zscore=formatter(res$zscore), pvalue=formatter(res$pvalue))
+  result <- list(beta=formatter(res$beta), se=formatter(res$se), zscore=formatter(res$zscore), pvalue=formatter(res$pvalue))
+
+  if (is.group.sig) {
+    result$beta   <- expand_rows(result$beta)
+    result$se     <- expand_rows(result$se)
+    result$zscore <- expand_rows(result$zscore)
+    result$pvalue <- expand_rows(result$pvalue)
+    ord <- sort(rownames(result$beta))
+    result$beta   <- result$beta[ord, , drop = FALSE]
+    result$se     <- result$se[ord, , drop = FALSE]
+    result$zscore <- result$zscore[ord, , drop = FALSE]
+    result$pvalue <- result$pvalue[ord, , drop = FALSE]
+  }
+
+  result
 }
