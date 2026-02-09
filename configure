@@ -20,41 +20,10 @@ OPENMP_LIBS=""
 
 case "$(uname -s)" in
   Darwin)
-    # macOS: Apple Clang needs -Xclang -fopenmp and libomp
-    if [ -d "/opt/homebrew/opt/libomp" ]; then
-      LIBOMP_PREFIX="/opt/homebrew/opt/libomp"
-    elif [ -d "/usr/local/opt/libomp" ]; then
-      LIBOMP_PREFIX="/usr/local/opt/libomp"
-    else
-      LIBOMP_PREFIX=""
-    fi
-    if [ -n "$LIBOMP_PREFIX" ]; then
-      # Test-compile to verify the OpenMP runtime is compatible
-      OMP_TEST_CFLAGS="-Xclang -fopenmp -I${LIBOMP_PREFIX}/include"
-      OMP_TEST_LIBS="-L${LIBOMP_PREFIX}/lib -lomp"
-      cat > /tmp/_ridger_omp_test.c <<EOTEST
-#include <omp.h>
-int main() {
-  int n = omp_get_max_threads();
-  #pragma omp parallel for
-  for (int i = 0; i < n; i++) { }
-  return 0;
-}
-EOTEST
-      if ${CC} ${OMP_TEST_CFLAGS} ${OMP_TEST_LIBS} /tmp/_ridger_omp_test.c \
-           -o /tmp/_ridger_omp_test 2>/dev/null \
-         && /tmp/_ridger_omp_test 2>/dev/null; then
-        OPENMP_CFLAGS="${OMP_TEST_CFLAGS}"
-        OPENMP_LIBS="${OMP_TEST_LIBS}"
-      else
-        echo "NOTE: OpenMP test-compile failed. Building without OpenMP (single-threaded)."
-        echo "  Multi-threading is optional; all functions work without it."
-      fi
-      rm -f /tmp/_ridger_omp_test.c /tmp/_ridger_omp_test
-    else
-      echo "NOTE: libomp not found. Building without OpenMP (single-threaded)."
-      echo "  To enable multi-threading: brew install libomp"
-    fi
+    # macOS: Apple Clang + Homebrew libomp has known runtime incompatibilities
+    # (e.g. missing ___kmpc_dispatch_deinit with clang 17). Disable OpenMP;
+    # all functions work single-threaded via #ifdef _OPENMP guards.
+    echo "NOTE: macOS detected. Building without OpenMP (single-threaded)."
     ;;
   *)
     # Linux / other: gcc supports -fopenmp natively
