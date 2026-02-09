@@ -2,6 +2,7 @@
 <!-- README.md is generated from README.Rmd. Please edit that file -->
 
 # RidgeR: Ridge Regression with Significance Testing
+
 ## Installation
 
 To install `RidgeR`, we recommend using `devtools`:
@@ -11,11 +12,33 @@ To install `RidgeR`, we recommend using `devtools`:
 devtools::install_github("beibeiru/RidgeR")
 ```
 
+**System Requirements:** GNU Scientific Library (GSL)
+
 The package has been installed successfully on Operating Systems:
 
 - Red Hat Enterprise Linux 8.10 (Ootpa)
 - macOS Sequoia 15.3.1
 - Windows 10
+
+## Functions
+
+| Function | Description |
+|----------|-------------|
+| `SecAct.inference.gsl.old` | Single-threaded ridge regression (legacy `.C` interface, 32-bit indexing) |
+| `SecAct.inference.gsl.new` | Multi-threaded ridge regression (`.Call` interface, 64-bit indexing) |
+
+### Key Parameters
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `Y` | — | Gene expression matrix (genes x samples) |
+| `SigMat` | `"SecAct"` | Signature matrix: `"SecAct"` (bundled) or path to file |
+| `lambda` | `5e+05` | Ridge regularization parameter |
+| `nrand` | `1000` | Number of permutations |
+| `ncores` | `NULL` | Number of CPU cores (`NULL` = auto-detect; `SecAct.inference.gsl.new` only) |
+| `rng_method` | `"srand"` | RNG backend: `"srand"` (C stdlib, matches R SecAct) or `"gsl"` (cross-platform GSL MT19937) |
+| `is.group.sig` | `TRUE` | Group correlated signatures before regression |
+| `is.group.cor` | `0.9` | Correlation threshold for signature grouping |
 
 ## Example
 
@@ -27,8 +50,8 @@ dataPath <- file.path(system.file(package = "RidgeR"), "extdata")
 expr.diff <- read.table(paste0(dataPath, "/Ly86-Fc_vs_Vehicle_logFC.txt"))
 
 # ---- Compare execution time between single-threaded and multi-threaded functions ----
-t_old <- system.time({res.old <- SecAct.inference.gsl.styp(expr.diff)})
-t_new <- system.time({res.new <- SecAct.inference.gsl.mtyp(expr.diff)})
+t_old <- system.time({res.old <- SecAct.inference.gsl.old(expr.diff)})
+t_new <- system.time({res.new <- SecAct.inference.gsl.new(expr.diff)})
 print(t_old); print(t_new)
 
 # ---- Compare output: head of z-scores ----
@@ -43,6 +66,29 @@ print(summary(diff))
 corr <- cor(res.new$zscore, res.old$zscore)
 print(corr)
 ```
+
+## Reproducibility
+
+RidgeR supports two RNG backends via the `rng_method` parameter:
+
+| `rng_method` | Description | Use case |
+|---|---|---|
+| `"srand"` (default) | C stdlib `srand()`/`rand()` | Match original R SecAct results **on the same platform** |
+| `"gsl"` | GSL Mersenne Twister (MT19937) | **Cross-platform** reproducibility; matches [SecActPy](https://github.com/data2intelligence/SecActpy) `rng_method='gsl'` |
+
+``` r
+# Default: match R SecAct on same platform (C stdlib rand, platform-dependent)
+res <- SecAct.inference.gsl.new(expr.diff, rng_method = "srand")
+
+# Cross-platform: matches SecActPy rng_method='gsl' on any OS
+res <- SecAct.inference.gsl.new(expr.diff, rng_method = "gsl")
+```
+
+> **Note:** C `rand()` implementations differ across operating systems, so
+> `rng_method="srand"` produces platform-dependent results. Use
+> `rng_method="gsl"` when results must be reproducible across Linux, macOS,
+> and Windows, or when comparing with
+> [SecActPy](https://github.com/data2intelligence/SecActpy).
 
 ## Benchmark Results
 - A 32-bit signed integer can index up to 2^31 − 1 = 2,147,483,647 (2.147 billion elements).
