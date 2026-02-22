@@ -110,9 +110,6 @@ res <- SecAct.inference.gsl.new(expr.diff, is.group.sig = FALSE)
 res <- SecAct.inference.gsl.new(expr.diff, is.group.sig = TRUE)
 ```
 
-Verified equivalence (max |zscore diff| < 5e-14, correlation = 1.0) for both
-cases against the original R SecAct package.
-
 ## Reproducibility
 
 RidgeR supports two RNG backends via the `rng_method` parameter:
@@ -135,6 +132,31 @@ res <- SecAct.inference.Yrow.mt(expr.diff, rng_method = "gsl")
 > `rng_method="gsl"` when results must be reproducible across Linux, macOS,
 > and Windows, or when comparing with
 > [SecActPy](https://github.com/data2intelligence/SecActpy).
+
+## Verified Equivalence
+
+All results verified on Linux glibc, R 4.3.2 using `Ly86-Fc_vs_Vehicle_logFC.txt`.
+
+### RidgeR internal (all 7 variants, GSL RNG)
+
+All 21 pairwise comparisons: max |zscore diff| &le; 2.91e-13, max |beta diff| &le; 2.65e-17. All variants produce identical results within machine precision.
+
+### RidgeR vs R SecAct (srand)
+
+| Comparison | Max |zscore diff| | Correlation |
+|---|---|---|
+| No grouping: `SecAct.inference.gsl` vs `RidgeR(is.group.sig=FALSE)` | 4.26e-14 | 1.000000000000000 |
+| With grouping: `SecAct.activity.inference` vs `RidgeR(is.group.sig=TRUE)` | 4.26e-14 | 1.000000000000000 |
+
+### RidgeR vs SecActPy
+
+| RNG | Grouping | Max |zscore diff| | Max |beta diff| | Correlation |
+|---|---|---|---|---|
+| `gsl` | Yes | 1.85e-13 | 2.04e-17 | 1.000000000000000 |
+| `srand` | Yes | 1.42e-13 | 2.04e-17 | 1.000000000000000 |
+| `srand` | No | 3.16e-13 | 2.58e-17 | 1.000000000000000 |
+
+See [VERIFICATION.md](VERIFICATION.md) for full methodology, threading model details, and the complete pairwise comparison matrix.
 
 ## Benchmark Results
 - A 32-bit signed integer can index up to 2^31 − 1 = 2,147,483,647 (2.147 billion elements).
