@@ -139,18 +139,18 @@ All results verified on Linux glibc, R 4.3.2 using `Ly86-Fc_vs_Vehicle_logFC.txt
 
 ### RidgeR internal (all 7 variants, GSL RNG)
 
-All 21 pairwise comparisons: max |zscore diff| &le; 2.91e-13, max |beta diff| &le; 2.65e-17. All variants produce identical results within machine precision.
+All 21 pairwise comparisons pass at machine precision. Max zscore diff &le; 2.91e-13, max beta diff &le; 2.65e-17.
 
 ### RidgeR vs R SecAct (srand)
 
-| Comparison | Max |zscore diff| | Correlation |
+| Comparison | Max zscore diff | Correlation |
 |---|---|---|
 | No grouping: `SecAct.inference.gsl` vs `RidgeR(is.group.sig=FALSE)` | 4.26e-14 | 1.000000000000000 |
 | With grouping: `SecAct.activity.inference` vs `RidgeR(is.group.sig=TRUE)` | 4.26e-14 | 1.000000000000000 |
 
 ### RidgeR vs SecActPy
 
-| RNG | Grouping | Max |zscore diff| | Max |beta diff| | Correlation |
+| RNG | Grouping | Max zscore diff | Max beta diff | Correlation |
 |---|---|---|---|---|
 | `gsl` | Yes | 1.85e-13 | 2.04e-17 | 1.000000000000000 |
 | `srand` | Yes | 1.42e-13 | 2.04e-17 | 1.000000000000000 |
