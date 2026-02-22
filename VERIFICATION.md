@@ -3,6 +3,8 @@
 This document describes how to verify correctness of the 7 RidgeR variants
 and their equivalence with R SecAct and SecActPy.
 
+Test data: `Ly86-Fc_vs_Vehicle_logFC.txt` (bundled in RidgeR and SecActPy).
+
 ---
 
 ## 1. RNG Backends: `srand` vs `gsl`
@@ -36,7 +38,7 @@ RidgeR supports two RNG backends for the permutation shuffle:
 ```r
 # On Linux (glibc), srand results match R SecAct on the same Linux platform
 res_ridger <- SecAct.inference.Yrow.st(expr.diff, rng_method = "srand")
-res_secact <- SecAct.inference(expr.diff)  # from original R SecAct package
+res_secact <- SecAct.inference.gsl(expr.diff)  # from R SecAct package (no grouping)
 max(abs(res_ridger$zscore - res_secact$zscore))
 # Expected: 0 (exact match on same platform)
 ```
@@ -129,16 +131,25 @@ computing the projection matrix T.
 
 ### 4.1 RidgeR ↔ R SecAct (original)
 
-| RidgeR Setting | R SecAct Equivalent | Match Condition |
+The R SecAct package has two main inference functions with different grouping behavior:
+
+| R SecAct Function | Grouping | RidgeR Equivalent |
 |---|---|---|
-| `rng_method = "srand"` | Default behavior | Same platform (glibc) |
-| Any Y-row variant, single-threaded | `SecAct.inference()` | Same RNG + same platform |
+| `SecAct.inference.gsl(Y)` | No | `SecAct.inference.gsl.new(Y, is.group.sig = FALSE)` |
+| `SecAct.activity.inference(Y, is.differential = TRUE)` | Yes (default) | `SecAct.inference.gsl.new(Y, is.group.sig = TRUE)` |
 
 ```r
-# On Linux with glibc:
-res_ridger <- SecAct.inference.gsl.old(expr.diff, rng_method = "srand")
-res_secact <- SecAct.inference(expr.diff)  # original R SecAct
+# Match SecAct.inference.gsl (no grouping)
+library(RidgeR); library(SecAct)
+res_secact <- SecAct.inference.gsl(expr.diff)
+res_ridger <- SecAct.inference.gsl.new(expr.diff, rng_method = "srand", is.group.sig = FALSE)
 max(abs(res_ridger$zscore - res_secact$zscore))
+# Expected: 0
+
+# Match SecAct.activity.inference (with grouping)
+res_secact_grp <- SecAct.activity.inference(expr.diff, is.differential = TRUE)
+res_ridger_grp <- SecAct.inference.gsl.new(expr.diff, rng_method = "srand", is.group.sig = TRUE)
+max(abs(res_ridger_grp$zscore[common,] - res_secact_grp$zscore[common,]))
 # Expected: 0
 ```
 
@@ -146,25 +157,31 @@ max(abs(res_ridger$zscore - res_secact$zscore))
 
 | RidgeR Setting | SecActPy Equivalent | Match Condition |
 |---|---|---|
+| `rng_method = "srand"` | `rng_method = "srand"` | Same platform (glibc) |
 | `rng_method = "gsl"` | `rng_method = "gsl"` | Cross-platform (any OS) |
-| Any variant | `ridge()` or `_ridge_permutation_numpy()` | Same rng_method = "gsl" |
+| `is.group.sig = TRUE` | `is_group_sig = True` | Both with grouping |
+| `is.group.sig = FALSE` | `is_group_sig = False` | Both without grouping |
 
 SecActPy uses T-column permutation with inverse permutation tables.
 RidgeR's T-col variants use the identical algorithm. RidgeR's Y-row variants
 produce mathematically identical results.
 
 ```r
-# RidgeR (R)
-res_r <- SecAct.inference.gsl.new(expr.diff, rng_method = "gsl")
+# RidgeR (R) — with grouping, GSL RNG
+res_r <- SecAct.inference.gsl.new(expr.diff, rng_method = "gsl", is.group.sig = TRUE)
 ```
 
 ```python
-# SecActPy (Python)
+# SecActPy (Python) — with grouping, GSL RNG
 import secactpy
-res_py = secactpy.ridge(Y, X, rng_method='gsl')
+res_py = secactpy.secact_activity_inference(
+    input_profile="Ly86-Fc_vs_Vehicle_logFC.txt",
+    is_differential=True, rng_method="gsl",
+    is_group_sig=True, is_group_cor=0.9
+)
 ```
 
-```
+```r
 # Compare (in R after loading Python results):
 max(abs(res_r$zscore - res_py_zscore))
 # Expected: < 1e-10
@@ -172,21 +189,21 @@ max(abs(res_r$zscore - res_py_zscore))
 
 ### 4.3 RNG Sequence Equivalence Chain
 
-All three packages produce the **same permutation sequence** with `rng_method = "gsl"`:
+All three packages produce the **same permutation sequence** when using matching RNG:
 
 ```
-R SecAct (C srand path)  ──── platform-dependent ────  RidgeR (srand path)
-                                                            │
-                                                        same platform
-                                                            │
-                                                       R SecAct original
+RidgeR (srand)  ──── same platform (glibc) ────  R SecAct (srand, default)
+     │                                                 │
+     │                                            same platform
+     │                                                 │
+RidgeR (srand)  ──── same platform (glibc) ────  SecActPy (srand)
 
-RidgeR (gsl path)  ──── cross-platform identical ────  SecActPy (gsl path)
-       │                                                    │
-  GSL MT19937                                          GSL MT19937
-  seed 0 → 4357                                        seed 0 → 4357
-  Fisher-Yates                                         Fisher-Yates
-  cumulative state                                     cumulative state
+RidgeR (gsl)  ──── cross-platform identical ────  SecActPy (gsl)
+     │                                                 │
+GSL MT19937                                       GSL MT19937
+seed 0 → 4357                                     seed 0 → 4357
+Fisher-Yates                                      Fisher-Yates
+cumulative state                                  cumulative state
 ```
 
 ---
@@ -236,7 +253,54 @@ for (i in seq_along(names_v)) {
 
 ---
 
-## 6. Threading Model Differences
+## 6. Verified Results (Linux glibc, R 4.3.2)
+
+### 6.1 All 7 RidgeR variants (GSL RNG)
+
+All 21 pairwise comparisons pass at machine precision:
+
+| Comparison | Max |zscore diff| | Max |beta diff| | Max |pvalue diff| |
+|---|---|---|---|
+| `naive` vs `yrow.st` | 2.70e-13 | 2.65e-17 | 0.00e+00 |
+| `naive` vs `tcol.st` | 2.84e-13 | 2.65e-17 | 0.00e+00 |
+| `naive` vs `yrow.mt` | 2.70e-13 | 2.65e-17 | 0.00e+00 |
+| `naive` vs `tcol.mt` | 2.77e-13 | 2.65e-17 | 0.00e+00 |
+| `naive` vs `gsl.old` | 2.91e-13 | 2.60e-17 | 1.39e-17 |
+| `naive` vs `gsl.new` | 2.77e-13 | 2.65e-17 | 0.00e+00 |
+| `yrow.st` vs `tcol.st` | 3.20e-14 | 0.00e+00 | 0.00e+00 |
+| `yrow.st` vs `yrow.mt` | 0.00e+00 | 0.00e+00 | 0.00e+00 |
+| `yrow.st` vs `tcol.mt` | 3.20e-14 | 0.00e+00 | 0.00e+00 |
+| `yrow.st` vs `gsl.old` | 3.55e-14 | 2.60e-18 | 1.39e-17 |
+| `yrow.st` vs `gsl.new` | 4.26e-14 | 0.00e+00 | 0.00e+00 |
+| `tcol.st` vs `yrow.mt` | 3.20e-14 | 0.00e+00 | 0.00e+00 |
+| `tcol.st` vs `tcol.mt` | 1.42e-14 | 0.00e+00 | 0.00e+00 |
+| `tcol.st` vs `gsl.old` | 3.55e-14 | 2.60e-18 | 1.39e-17 |
+| `tcol.st` vs `gsl.new` | 1.07e-14 | 0.00e+00 | 0.00e+00 |
+| `yrow.mt` vs `tcol.mt` | 3.20e-14 | 0.00e+00 | 0.00e+00 |
+| `yrow.mt` vs `gsl.old` | 3.55e-14 | 2.60e-18 | 1.39e-17 |
+| `yrow.mt` vs `gsl.new` | 4.26e-14 | 0.00e+00 | 0.00e+00 |
+| `tcol.mt` vs `gsl.old` | 2.84e-14 | 2.60e-18 | 1.39e-17 |
+| `tcol.mt` vs `gsl.new` | 2.13e-14 | 0.00e+00 | 0.00e+00 |
+| `gsl.old` vs `gsl.new` | 3.55e-14 | 2.60e-18 | 1.39e-17 |
+
+### 6.2 RidgeR vs R SecAct (srand)
+
+| Comparison | Max |zscore| | Max |beta| | Max |se| | Max |pvalue| | Correlation |
+|---|---|---|---|---|---|
+| No grouping: `SecAct.inference.gsl` vs `RidgeR(is.group.sig=FALSE)` | 4.26e-14 | 2.28e-18 | 1.36e-19 | 1.11e-16 | 1.000000000000000 |
+| With grouping: `SecAct.activity.inference` vs `RidgeR(is.group.sig=TRUE)` | 4.26e-14 | 2.60e-18 | 1.36e-19 | 3.47e-18 | 1.000000000000000 |
+
+### 6.3 RidgeR vs SecActPy
+
+| Comparison | Max |zscore| | Max |beta| | Max |pvalue| | Correlation |
+|---|---|---|---|---|
+| GSL, with grouping | 1.85e-13 | 2.04e-17 | 0.00e+00 | 1.000000000000000 |
+| srand, with grouping | 1.42e-13 | 2.04e-17 | 0.00e+00 | 1.000000000000000 |
+| srand, without grouping | 3.16e-13 | 2.58e-17 | 0.00e+00 | 1.000000000000000 |
+
+---
+
+## 7. Threading Model Differences
 
 | Variant | Parallelization Axis | Atomic Writes | Race Conditions |
 |---|---|---|---|
