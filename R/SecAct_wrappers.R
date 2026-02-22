@@ -165,15 +165,17 @@ SecAct.inference.gsl.new <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=100
   result
 }
 
+# FIX: Use byrow=TRUE to match the C backend's row-major output layout.
+# The C core writes flat output as [r * m + s] (row-major, protein x sample),
+# so we must read it back row-by-row. The old dim(v) <- c(p, m) approach
+# was column-major and caused proteins and samples to be scrambled.
 #' @keywords internal
 .secact_format_call <- function(res, X, Y) {
   p <- ncol(X)
   m <- ncol(Y)
   formatter <- function(v) {
-    dim(v) <- c(p, m)
-    rownames(v) <- colnames(X)
-    colnames(v) <- colnames(Y)
-    return(v)
+    matrix(v, nrow = p, ncol = m, byrow = TRUE,
+           dimnames = list(colnames(X), colnames(Y)))
   }
   list(
     beta   = formatter(res$beta),
