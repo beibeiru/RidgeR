@@ -1,4 +1,5 @@
 
+export(SecAct.inference)
 export(SecAct.inference.gsl.old)
 export(SecAct.inference.gsl.new)
 export(SecAct.inference.naive)
@@ -6,4 +7,7 @@ export(SecAct.inference.Yrow.st)
 export(SecAct.inference.Yrow.mt)
 export(SecAct.inference.Tcol.st)
 export(SecAct.inference.Tcol.mt)
+export(SecAct.activity.inference)
+export(SecAct.activity.inference.ST)
+export(SecAct.activity.inference.scRNAseq)
 useDynLib(RidgeR, .registration=TRUE)

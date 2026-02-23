@@ -21,8 +21,59 @@ expand_rows <- function(mat) {
 }
 
 #' @keywords internal
+transferSymbol <- function(x) {
+  alias2symbol <- read.csv(
+    system.file("extdata", "NCBI_20251008_gene_result_alias2symbol.csv.gz", package = "SecAct"),
+    as.is = TRUE
+  )
+  alias2symbol[is.na(alias2symbol[, "Alias"]), "Alias"] <- "NA"
+  x[x %in% alias2symbol[, 1]] <- alias2symbol[
+    match(x[x %in% alias2symbol[, 1]], alias2symbol[, 1]), 2
+  ]
+  x
+}
+
+#' @keywords internal
+rm_duplicates <- function(mat) {
+  gene_count <- table(rownames(mat))
+  gene_dupl <- names(gene_count)[gene_count > 1]
+  if (length(gene_dupl) > 0) {
+    gene_unique <- names(gene_count)[gene_count == 1]
+    gene_unique_index <- which(rownames(mat) %in% gene_unique)
+    gene_dupl_index <- c()
+    for (gene in gene_dupl) {
+      gene_dupl_index_gene <- which(rownames(mat) %in% gene)
+      mat_dupl_gene <- mat[gene_dupl_index_gene, ]
+      dupl_sum <- Matrix::rowSums(mat_dupl_gene)
+      max_flag <- which(dupl_sum == max(dupl_sum))
+      gene_dupl_index <- c(gene_dupl_index, gene_dupl_index_gene[max_flag[1]])
+    }
+    mat <- mat[sort(c(gene_unique_index, gene_dupl_index)), ]
+  }
+  return(mat)
+}
+
+#' @keywords internal
+sweep_sparse <- function(m, margin, stats, fun) {
+  f <- match.fun(fun)
+  if (margin == 1) {
+    idx <- m@i + 1
+  } else {
+    if (class(m)[1] == "dgCMatrix") {
+      idx <- rep(1:m@Dim[2], diff(m@p))
+    } else {
+      idx <- m@j + 1
+    }
+  }
+  m@x <- f(m@x, stats[idx])
+  m
+}
+
+#' @keywords internal
 .secact_preprocess <- function(Y, SigMat, is.group.sig, is.group.cor, rng_method) {
-  if (SigMat == "SecAct") {
+  if (is.matrix(SigMat) || is.data.frame(SigMat)) {
+    X <- as.data.frame(SigMat)
+  } else if (SigMat == "SecAct") {
     Xfile <- file.path(system.file(package = "SecAct"), "extdata/SecAct.tsv.gz")
     X <- read.table(Xfile, sep = "\t", check.names = FALSE)
   } else {
@@ -37,6 +88,7 @@ expand_rows <- function(mat) {
   rng_int <- ifelse(rng_int == "gsl", 1L, 0L)
 
   olp <- intersect(row.names(Y), row.names(X))
+  if (length(olp) < 2) stop("The overlapped genes between your expression matrix and the signature matrix are too few!")
   X <- as.matrix(X[olp, , drop = FALSE])
   Y <- as.matrix(Y[olp, , drop = FALSE])
 
@@ -93,8 +145,8 @@ expand_rows <- function(mat) {
 #'   \code{method} parameter. Platform defaults:
 #'   \itemize{
 #'     \item \strong{Linux}: \code{SecAct.inference.Tcol.mt} — T-column permutation, multi-threaded (fastest)
-#'     \item \strong{macOS}: \code{SecAct.inference.gsl.old} — legacy single-threaded (OpenMP unreliable without libomp)
-#'     \item \strong{Windows}: \code{SecAct.inference.Tcol.st} — T-column permutation, single-threaded (no OpenMP by default)
+#'     \item \strong{macOS}: \code{SecAct.inference.Tcol.st} — legacy single-threaded (OpenMP unreliable without libomp)
+#'     \item \strong{Windows}: \code{SecAct.inference.Tcol.mt} — T-column permutation, multi-threaded (OpenMP by Rtools)
 #'   }
 #' @param Y Gene expression matrix (genes x samples).
 #' @param SigMat Signature matrix: \code{"SecAct"} (bundled) or path to a tab-separated file.
@@ -132,8 +184,8 @@ SecAct.inference <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand = 1000,
     is_windows <- .Platform$OS.type == "windows"
 
     if (is_mac) {
-      method <- "gsl.old"   # macOS: OpenMP unreliable without libomp → legacy single-threaded
-      message("[SecAct.inference] Platform: macOS -> using gsl.old")
+      method <- "Tcol.st"   # macOS: OpenMP unreliable without libomp → single-threaded (w veclib blas)
+      message("[SecAct.inference] Platform: macOS -> using Tcol.st")
     } else {
       method <- "Tcol.mt"   # Linux / Windows (Rtools): multi-threaded T-column permutation
       message("[SecAct.inference] Platform: ", ifelse(is_windows, "Windows", "Linux"), " -> using Tcol.mt")
@@ -182,7 +234,9 @@ SecAct.inference <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand = 1000,
 SecAct.inference.gsl.old <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand = 1000,
                                      rng_method = "srand", is.group.sig = TRUE, is.group.cor = 0.9)
 {
-  if (SigMat == "SecAct") {
+  if (is.matrix(SigMat) || is.data.frame(SigMat)) {
+    X <- as.data.frame(SigMat)
+  } else if (SigMat == "SecAct") {
     Xfile <- file.path(system.file(package = "SecAct"), "extdata/SecAct.tsv.gz")
     X <- read.table(Xfile, sep = "\t", check.names = FALSE)
   } else {
@@ -443,4 +497,300 @@ SecAct.inference.naive <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand =
 
   result <- list(beta = beta, se = se, zscore = zscore, pvalue = pvalue)
   .secact_postprocess(result, is.group.sig)
+}
+
+
+# =========================================================
+# SecAct activity inference wrappers
+# =========================================================
+
+#' @title Secreted protein activity inference
+#' @description Infer the signaling activity of over 1000 secreted proteins from gene expression profiles.
+#' @param inputProfile Gene expression matrix with gene symbol (row) x sample (column).
+#' @param inputProfile_control Gene expression matrix with gene symbol (row) x sample (column).
+#' @param is.differential A logical flag indicating whether inputProfile has been differential profiles against the control (Default: FALSE).
+#' @param is.paired A logical flag indicating whether you want a paired operation of differential profiles between inputProfile and inputProfile_control if samples in inputProfile and inputProfile_control are paired (Default: FALSE).
+#' @param is.singleSampleLevel A logical flag indicating whether to calculate activity change for each single sample between inputProfile and inputProfile_control (Default: FALSE). If FALSE, calculate the overall activity change between two phenotypes.
+#' @param sigMatrix Secreted protein signature matrix. Could be "SecAct", "CytoSig", "SecAct-Breast", "SecAct-Colorectal", "SecAct-Glioblastoma", "SecAct-Kidney", "SecAct-Liver", "SecAct-Lung-Adeno", "SecAct-Ovarian", "SecAct-Pancreatic", "SecAct-Prostate". SecAct signatures were derived from all cancer ST samples; SecAct-XXX signatures were derived from XXX cancer ST samples.
+#' @param is.filter.sig A logical flag indicating whether to filter the secreted protein signatures based on the genes from inputProfile (Default: FALSE). Because some sequencing platforms (e.g., CosMx) cover only a subset of secreted proteins, setting this option to TRUE restricts the activity inference on those proteins.
+#' @param is.group.sig A logical flag indicating whether to group similar signatures (Default: TRUE). Many secreted proteins, such as cytokines with similar cell surface receptors and downstream pathways, have cellular effects that appear redundant within a cellular context. When enabled, this option clusters secreted proteins based on Pearson correlations among their composite signatures. The output still reports activity estimates for all secreted proteins prior to clustering. Secreted proteins assigned to the same non-redundant cluster share the same inferred activity.
+#' @param is.group.cor A numeric value specifying the correlation cutoff used to define similar signatures (Default: 0.90). When r > 0.90, 1,170 secreted protein signatures are grouped into 657 non-redundant signature groups.
+#' @param lambda Penalty factor in the ridge regression. If NULL, lambda will be assigned as 5e+05 or 10000 when sigMatrix = "SecAct" or "CytoSig", respectively.
+#' @param nrand Number of randomization in the permutation test, with a default value of 1000.
+#' @param ncores Number of CPU cores for multi-threaded variants (NULL = auto-detect).
+#' @param rng_method RNG backend: "srand" (default) or "gsl".
+#' @param method Backend to use: "auto" (default), "Tcol.mt", "Tcol.st", "Yrow.mt", "Yrow.st", "naive", or "gsl.old".
+#' @return
+#'
+#' A list with four items, each is a matrix.
+#' beta: regression coefficients
+#' se: standard errors of coefficients
+#' zscore: beta/se
+#' pvalue: statistical significance
+#'
+#' @rdname SecAct.activity.inference
+#' @export
+#'
+SecAct.activity.inference <- function(
+    inputProfile,
+    inputProfile_control = NULL,
+    is.differential = FALSE,
+    is.paired = FALSE,
+    is.singleSampleLevel = FALSE,
+    sigMatrix = "SecAct",
+    is.filter.sig = FALSE,
+    is.group.sig = TRUE,
+    is.group.cor = 0.9,
+    lambda = 5e+05,
+    nrand = 1000,
+    ncores = NULL,
+    rng_method = "srand",
+    method = "auto"
+)
+{
+  if (class(inputProfile)[1] == "SpaCET") {
+    stop("Please use 'SecAct.activity.inference.ST'.")
+  }
+  if (class(inputProfile)[1] == "Seurat") {
+    stop("Please use 'SecAct.activity.inference.scRNAseq'.")
+  }
+
+  # --- Prepare Y (differential expression profiles) ---
+  if (is.differential) {
+    Y <- inputProfile
+    if (ncol(Y) == 1) colnames(Y) <- "Change"
+  } else {
+    if (is.null(inputProfile_control)) {
+      if (ncol(inputProfile) == 1) stop("Please include at least two samples in 'inputProfile' or set 'inputProfile_control'.")
+      Y <- inputProfile - rowMeans(inputProfile)
+    } else {
+      if (is.paired) {
+        Y <- inputProfile - inputProfile_control[, colnames(inputProfile), drop = FALSE]
+      } else {
+        Y <- inputProfile - rowMeans(inputProfile_control)
+      }
+      if (is.singleSampleLevel == FALSE) {
+        Y <- matrix(rowMeans(Y), ncol = 1, dimnames = list(rownames(Y), "Change"))
+      }
+    }
+  }
+
+  # --- Load signature matrix ---
+  if (sigMatrix == "SecAct") {
+    Xfile <- file.path(system.file(package = "SecAct"), "extdata/SecAct.tsv.gz")
+    X <- read.table(Xfile, sep = "\t", check.names = FALSE)
+    if (is.null(lambda)) lambda <- 5e+05
+  } else if (grepl("SecAct-", sigMatrix, fixed = TRUE)) {
+    Xfile <- paste0("https://hpc.nih.gov/~Jiang_Lab/SecAct_Package/", sigMatrix, "_filterByPan_ds3_vst.tsv")
+    X <- read.table(Xfile, sep = "\t", check.names = FALSE)
+    if (is.null(lambda)) lambda <- 5e+05
+  } else if (sigMatrix == "CytoSig") {
+    Xfile <- "https://raw.githubusercontent.com/data2intelligence/CytoSig/refs/heads/master/CytoSig/signature.centroid"
+    X <- read.table(Xfile, sep = "\t", check.names = FALSE)
+    if (is.null(lambda)) lambda <- 10000
+  } else {
+    X <- read.table(sigMatrix, sep = "\t", check.names = FALSE)
+  }
+
+  # --- Filter signatures ---
+  if (is.filter.sig == TRUE) {
+    X <- X[, colnames(X) %in% row.names(Y)]
+  }
+
+  # --- Call platform-aware inference ---
+  SecAct.inference(
+    Y = Y,
+    SigMat = X,
+    lambda = lambda,
+    nrand = nrand,
+    ncores = ncores,
+    rng_method = rng_method,
+    method = method,
+    is.group.sig = is.group.sig,
+    is.group.cor = is.group.cor
+  )
+}
+
+
+#' @title Spot activity inference from spatial data
+#' @description Calculate secreted protein signaling activity of spots from spatial transcriptomics data.
+#' @param inputProfile A SpaCET object.
+#' @param inputProfile_control A SpaCET object.
+#' @param scale.factor Sets the scale factor for spot-level normalization.
+#' @param sigMatrix Secreted protein signature matrix. Could be "SecAct", "CytoSig", "SecAct-Breast", "SecAct-Colorectal", "SecAct-Glioblastoma", "SecAct-Kidney", "SecAct-Liver", "SecAct-Lung-Adeno", "SecAct-Ovarian", "SecAct-Pancreatic", "SecAct-Prostate". SecAct signatures were derived from all cancer ST samples; SecAct-XXX signatures were derived from XXX cancer ST samples.
+#' @param is.filter.sig A logical flag indicating whether to filter the secreted protein signatures based on the genes from inputProfile (Default: FALSE). Because some sequencing platforms (e.g., CosMx) cover only a subset of secreted proteins, setting this option to TRUE restricts the activity inference on those proteins.
+#' @param is.group.sig A logical flag indicating whether to group similar signatures (Default: TRUE). Many secreted proteins, such as cytokines with similar cell surface receptors and downstream pathways, have cellular effects that appear redundant within a cellular context. When enabled, this option clusters secreted proteins based on Pearson correlations among their composite signatures. The output still reports activity estimates for all secreted proteins prior to clustering. Secreted proteins assigned to the same non-redundant cluster share the same inferred activity.
+#' @param is.group.cor A numeric value specifying the correlation cutoff used to define similar signatures (Default: 0.90). When r > 0.90, 1,170 secreted protein signatures are grouped into 657 non-redundant signature groups.
+#' @param lambda Penalty factor in the ridge regression. If NULL, lambda will be assigned as 5e+05 or 10000 when sigMatrix = "SecAct" or "CytoSig", respectively.
+#' @param nrand Number of randomization in the permutation test, with a default value 1000.
+#' @param ncores Number of CPU cores for multi-threaded variants (NULL = auto-detect).
+#' @param rng_method RNG backend: "srand" (default) or "gsl".
+#' @param method Backend to use: "auto" (default), "Tcol.mt", "Tcol.st", "Yrow.mt", "Yrow.st", "naive", or "gsl.old".
+#' @return A SpaCET object.
+#' @rdname SecAct.activity.inference.ST
+#' @export
+#'
+SecAct.activity.inference.ST <- function(
+    inputProfile,
+    inputProfile_control = NULL,
+    scale.factor = 1e+05,
+    sigMatrix = "SecAct",
+    is.filter.sig = FALSE,
+    is.group.sig = TRUE,
+    is.group.cor = 0.9,
+    lambda = 5e+05,
+    nrand = 1000,
+    ncores = NULL,
+    rng_method = "srand",
+    method = "auto"
+)
+{
+  if (!class(inputProfile)[1] == "SpaCET") {
+    stop("Please input a SpaCET object.")
+  }
+
+  # extract count matrix
+  expr <- inputProfile@input$counts
+  expr <- expr[Matrix::rowSums(expr) > 0, ]
+  rownames(expr) <- transferSymbol(rownames(expr))
+  expr <- rm_duplicates(expr)
+
+  # normalize to TPM
+  stats <- Matrix::colSums(expr)
+  expr <- sweep_sparse(expr, 2, stats, "/")
+  expr@x <- expr@x * scale.factor
+
+  # transform to log space
+  expr@x <- log2(expr@x + 1)
+
+  if (is.null(inputProfile_control)) {
+    # normalized with the control samples
+    expr.diff <- expr - Matrix::rowMeans(expr)
+  } else {
+    # extract count matrix
+    expr_control <- inputProfile_control@input$counts
+    expr_control <- expr_control[Matrix::rowSums(expr_control) > 0, ]
+    rownames(expr_control) <- transferSymbol(rownames(expr_control))
+    expr_control <- rm_duplicates(expr_control)
+
+    # normalize to TPM
+    stats <- Matrix::colSums(expr_control)
+    expr_control <- sweep_sparse(expr_control, 2, stats, "/")
+    expr_control@x <- expr_control@x * scale.factor
+
+    # transform to log space
+    expr_control@x <- log2(expr_control@x + 1)
+
+    olp <- intersect(rownames(expr), rownames(expr_control))
+    expr.diff <- expr[olp, ] - Matrix::rowMeans(expr_control[olp, ])
+  }
+
+  res <- SecAct.activity.inference(
+    inputProfile = expr.diff,
+    is.differential = TRUE,
+    sigMatrix = sigMatrix,
+    is.filter.sig = is.filter.sig,
+    is.group.sig = is.group.sig,
+    is.group.cor = is.group.cor,
+    lambda = lambda,
+    nrand = nrand,
+    ncores = ncores,
+    rng_method = rng_method,
+    method = method
+  )
+
+  inputProfile@results$SecAct_output$SecretedProteinActivity <- res
+
+  inputProfile
+}
+
+
+#' @title Cell state activity inference from single cell data
+#' @description Calculate secreted protein signaling activity of cell states from single cell RNA-Sequencing data.
+#' @param inputProfile A Seurat object.
+#' @param cellType_meta Column name in meta data that includes cell-type annotations.
+#' @param is.singleCellLevel A logical flag indicating whether to calculate for each single cell (Default: FALSE).
+#' @param sigMatrix Secreted protein signature matrix. Could be "SecAct", "CytoSig", "SecAct-Breast", "SecAct-Colorectal", "SecAct-Glioblastoma", "SecAct-Kidney", "SecAct-Liver", "SecAct-Lung-Adeno", "SecAct-Ovarian", "SecAct-Pancreatic", "SecAct-Prostate". SecAct signatures were derived from all cancer ST samples; SecAct-XXX signatures were derived from XXX cancer ST samples.
+#' @param is.filter.sig A logical flag indicating whether to filter the secreted protein signatures based on the genes from inputProfile (Default: FALSE). Because some sequencing platforms (e.g., CosMx) cover only a subset of secreted proteins, setting this option to TRUE restricts the activity inference on those proteins.
+#' @param is.group.sig A logical flag indicating whether to group similar signatures (Default: TRUE). Many secreted proteins, such as cytokines with similar cell surface receptors and downstream pathways, have cellular effects that appear redundant within a cellular context. When enabled, this option clusters secreted proteins based on Pearson correlations among their composite signatures. The output still reports activity estimates for all secreted proteins prior to clustering. Secreted proteins assigned to the same non-redundant cluster share the same inferred activity.
+#' @param is.group.cor A numeric value specifying the correlation cutoff used to define similar signatures (Default: 0.90). When r > 0.90, 1,170 secreted protein signatures are grouped into 657 non-redundant signature groups.
+#' @param lambda Penalty factor in the ridge regression. If NULL, lambda will be assigned as 5e+05 or 10000 when sigMatrix = "SecAct" or "CytoSig", respectively.
+#' @param nrand Number of randomization in the permutation test, with a default value 1000.
+#' @param ncores Number of CPU cores for multi-threaded variants (NULL = auto-detect).
+#' @param rng_method RNG backend: "srand" (default) or "gsl".
+#' @param method Backend to use: "auto" (default), "Tcol.mt", "Tcol.st", "Yrow.mt", "Yrow.st", "naive", or "gsl.old".
+#' @return A Seurat object.
+#' @rdname SecAct.activity.inference.scRNAseq
+#' @export
+#'
+SecAct.activity.inference.scRNAseq <- function(
+    inputProfile,
+    cellType_meta,
+    is.singleCellLevel = FALSE,
+    sigMatrix = "SecAct",
+    is.filter.sig = FALSE,
+    is.group.sig = TRUE,
+    is.group.cor = 0.9,
+    lambda = 5e+05,
+    nrand = 1000,
+    ncores = NULL,
+    rng_method = "srand",
+    method = "auto"
+)
+{
+  if (!class(inputProfile)[1] == "Seurat") {
+    stop("Please input a Seurat object.")
+  }
+
+  if (class(inputProfile@assays$RNA) == "Assay5") {
+    counts <- inputProfile@assays$RNA@layers$counts
+    colnames(counts) <- rownames(inputProfile@assays$RNA@cells)
+    rownames(counts) <- rownames(inputProfile@assays$RNA@features)
+  } else {
+    counts <- inputProfile@assays$RNA@counts
+  }
+
+  rownames(counts) <- transferSymbol(rownames(counts))
+  counts <- rm_duplicates(counts)
+
+  if (is.singleCellLevel == FALSE) {
+    cellType_vec <- inputProfile@meta.data[, cellType_meta]
+
+    # generate pseudo bulk
+    expr <- data.frame()
+    for (cellType in sort(unique(cellType_vec))) {
+      expr[rownames(counts), cellType] <- Matrix::rowSums(counts[, cellType_vec == cellType, drop = FALSE])
+    }
+
+    # normalize to TPM
+    expr <- sweep(expr, 2, Matrix::colSums(expr), "/") * 1e6
+  } else {
+    expr <- sweep(counts, 2, Matrix::colSums(counts), "/") * 1e5
+  }
+  rm(counts); gc()
+
+  # transform to log space
+  expr <- log2(expr + 1)
+
+  # normalized with the control samples
+  expr.diff <- expr - Matrix::rowMeans(expr)
+
+  rm(expr); gc()
+
+  inputProfile@misc$SecAct_output$SecretedProteinActivity <-
+    SecAct.activity.inference(
+      inputProfile = expr.diff,
+      is.differential = TRUE,
+      sigMatrix = sigMatrix,
+      is.filter.sig = is.filter.sig,
+      is.group.sig = is.group.sig,
+      is.group.cor = is.group.cor,
+      lambda = lambda,
+      nrand = nrand,
+      ncores = ncores,
+      rng_method = rng_method,
+      method = method
+    )
+
+  inputProfile
 }
