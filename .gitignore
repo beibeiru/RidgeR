@@ -9,3 +9,4 @@ src/Makevars
 logs
 tmp*
 run*
+*.tar.gz
