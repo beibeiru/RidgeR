@@ -20,109 +20,6 @@ expand_rows <- function(mat) {
   do.call(rbind, new_rows)
 }
 
-#' @title Secreted protein activity inference (Legacy Version)
-#' @description Old single-threaded implementation.
-#' @param Y Gene expression matrix.
-#' @param SigMat Secreted protein signature matrix.
-#' @param lambda Penalty factor.
-#' @param nrand Number of randomizations.
-#' @param rng_method RNG method: "srand" (default, platform-dependent C stdlib rand)
-#'   or "gsl" (cross-platform GSL MT19937, matches SecActPy GSLRNG).
-#' @param is.group.sig Logical; group correlated signatures before regression (default TRUE).
-#' @param is.group.cor Correlation threshold for grouping (default 0.9).
-#' @export
-SecAct.inference.gsl.old <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=1000, rng_method="srand",
-                                     is.group.sig=TRUE, is.group.cor=0.9)
-{
-  if(SigMat=="SecAct") {
-    Xfile<- file.path(system.file(package = "SecAct"), "extdata/SecAct.tsv.gz")
-    X <- read.table(Xfile,sep="\t",check.names=F)
-  } else {
-    X <- read.table(SigMat,sep="\t",check.names=F)
-  }
-
-  if (is.group.sig) {
-    X <- group_signatures(X, cor_threshold = is.group.cor)
-  }
-
-  rng_int <- match.arg(rng_method, c("srand", "gsl"))
-  rng_int <- ifelse(rng_int == "gsl", 1L, 0L)
-
-  olp <- intersect(row.names(Y),row.names(X))
-  X <- as.matrix(X[olp,,drop=F])
-  Y <- as.matrix(Y[olp,,drop=F])
-  X <- scale(X); Y <- scale(Y)
-  X[is.na(X)] <- 0; Y[is.na(Y)] <- 0
-
-  n <- length(olp); p <- ncol(X); m <- ncol(Y)
-
-  res <- .C("ridgeReg",
-            X=as.double(t(X)),
-            Y=as.double(t(Y)),
-            as.integer(n), as.integer(p), as.integer(m),
-            as.double(lambda), as.double(nrand),
-            beta=double(p*m), se=double(p*m), zscore=double(p*m), pvalue=double(p*m),
-            rng_method=as.integer(rng_int)
-  )
-
-  formatter <- function(v) matrix(v, byrow=T, ncol=m, dimnames=list(colnames(X), colnames(Y)))
-  result <- list(beta=formatter(res$beta), se=formatter(res$se), zscore=formatter(res$zscore), pvalue=formatter(res$pvalue))
-
-  if (is.group.sig) {
-    result$beta   <- expand_rows(result$beta)
-    result$se     <- expand_rows(result$se)
-    result$zscore <- expand_rows(result$zscore)
-    result$pvalue <- expand_rows(result$pvalue)
-    ord <- sort(rownames(result$beta))
-    result$beta   <- result$beta[ord, , drop = FALSE]
-    result$se     <- result$se[ord, , drop = FALSE]
-    result$zscore <- result$zscore[ord, , drop = FALSE]
-    result$pvalue <- result$pvalue[ord, , drop = FALSE]
-  }
-
-  result
-}
-
-#' @title Secreted protein activity inference (Optimized Version)
-#' @description Dispatches to one of 4 optimized variants based on the \code{method} parameter.
-#'   Default is \code{"Tcol.mt"} (T-column permutation, multi-threaded).
-#' @param Y Gene expression matrix.
-#' @param SigMat Secreted protein signature matrix.
-#' @param lambda Penalty factor.
-#' @param nrand Number of randomizations.
-#' @param ncores Number of cores (default: all available; multi-threaded variants only).
-#' @param rng_method RNG method: "srand" (default, platform-dependent C stdlib rand)
-#'   or "gsl" (cross-platform GSL MT19937, matches SecActPy GSLRNG).
-#' @param method Variant to use: "Tcol.mt" (default), "Tcol.st", "Yrow.mt", or "Yrow.st".
-#' @param is.group.sig Logical; group correlated signatures before regression (default TRUE).
-#' @param is.group.cor Correlation threshold for grouping (default 0.9).
-#' @export
-SecAct.inference.gsl.new <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=1000, ncores=NULL, rng_method="srand",
-                                     method="Tcol.mt", is.group.sig=TRUE, is.group.cor=0.9)
-{
-  method <- match.arg(method, c("Tcol.mt", "Tcol.st", "Yrow.mt", "Yrow.st"))
-
-  switch(method,
-    Tcol.mt = SecAct.inference.Tcol.mt(Y, SigMat=SigMat, lambda=lambda, nrand=nrand,
-                                       ncores=ncores, rng_method=rng_method,
-                                       is.group.sig=is.group.sig, is.group.cor=is.group.cor),
-    Tcol.st = SecAct.inference.Tcol.st(Y, SigMat=SigMat, lambda=lambda, nrand=nrand,
-                                       rng_method=rng_method,
-                                       is.group.sig=is.group.sig, is.group.cor=is.group.cor),
-    Yrow.mt = SecAct.inference.Yrow.mt(Y, SigMat=SigMat, lambda=lambda, nrand=nrand,
-                                       ncores=ncores, rng_method=rng_method,
-                                       is.group.sig=is.group.sig, is.group.cor=is.group.cor),
-    Yrow.st = SecAct.inference.Yrow.st(Y, SigMat=SigMat, lambda=lambda, nrand=nrand,
-                                       rng_method=rng_method,
-                                       is.group.sig=is.group.sig, is.group.cor=is.group.cor)
-  )
-}
-
-
-# =========================================================
-# Shared helpers for the 5 new variants
-# =========================================================
-
 #' @keywords internal
 .secact_preprocess <- function(Y, SigMat, is.group.sig, is.group.cor, rng_method) {
   if (SigMat == "SecAct") {
@@ -187,11 +84,196 @@ SecAct.inference.gsl.new <- function(Y, SigMat="SecAct", lambda=5e+05, nrand=100
 
 
 # =========================================================
-# 5 New Variants
+# Platform-aware wrapper
+# =========================================================
+
+#' @title Secreted protein activity inference (Platform-aware wrapper)
+#' @description Unified entry point that automatically selects the best backend
+#'   for the current platform, or dispatches to a user-specified backend via the
+#'   \code{method} parameter. Platform defaults:
+#'   \itemize{
+#'     \item \strong{Linux}: \code{SecAct.inference.Tcol.mt} — T-column permutation, multi-threaded (fastest)
+#'     \item \strong{macOS}: \code{SecAct.inference.gsl.old} — legacy single-threaded (OpenMP unreliable without libomp)
+#'     \item \strong{Windows}: \code{SecAct.inference.Tcol.st} — T-column permutation, single-threaded (no OpenMP by default)
+#'   }
+#' @param Y Gene expression matrix (genes x samples).
+#' @param SigMat Signature matrix: \code{"SecAct"} (bundled) or path to a tab-separated file.
+#' @param lambda Ridge regularization parameter (default: 5e+05).
+#' @param nrand Number of permutations (default: 1000).
+#' @param ncores Number of CPU cores for multi-threaded variants (\code{NULL} = auto-detect).
+#' @param rng_method RNG backend: \code{"srand"} (default, platform-dependent C stdlib)
+#'   or \code{"gsl"} (cross-platform GSL MT19937, matches SecActPy).
+#' @param method Backend to use. One of \code{"auto"} (default), \code{"Tcol.mt"},
+#'   \code{"Tcol.st"}, \code{"Yrow.mt"}, \code{"Yrow.st"}, \code{"naive"}, or \code{"gsl.old"}.
+#'   \code{"auto"} selects the platform default.
+#' @param is.group.sig Logical; group correlated signatures before regression (default TRUE).
+#' @param is.group.cor Correlation threshold for signature grouping (default 0.9).
+#' @return A list with matrices \code{beta}, \code{se}, \code{zscore}, \code{pvalue}
+#'   of dimension (proteins x samples).
+#' @examples
+#' \dontrun{
+#' # Auto-select best backend for current platform
+#' res <- SecAct.inference(expr.diff)
+#'
+#' # Force a specific backend
+#' res <- SecAct.inference(expr.diff, method = "Tcol.mt", ncores = 8)
+#' res <- SecAct.inference(expr.diff, method = "gsl.old")
+#' }
+#' @export
+SecAct.inference <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand = 1000,
+                             ncores = NULL, rng_method = "srand", method = "auto",
+                             is.group.sig = TRUE, is.group.cor = 0.9)
+{
+  method <- match.arg(method, c("auto", "Tcol.mt", "Tcol.st", "Yrow.mt", "Yrow.st", "naive", "gsl.old"))
+
+  # Resolve "auto" to the platform-appropriate backend
+  if (method == "auto") {
+    is_mac     <- grepl("darwin",  R.version$os, ignore.case = TRUE)
+    is_windows <- .Platform$OS.type == "windows"
+
+    if (is_mac) {
+      method <- "gsl.old"   # macOS: OpenMP unreliable without libomp → legacy single-threaded
+      message("[SecAct.inference] Platform: macOS -> using gsl.old")
+    } else {
+      method <- "Tcol.mt"   # Linux / Windows (Rtools): multi-threaded T-column permutation
+      message("[SecAct.inference] Platform: ", ifelse(is_windows, "Windows", "Linux"), " -> using Tcol.mt")
+    }
+  }
+
+  # Dispatch
+  switch(method,
+    Tcol.mt = SecAct.inference.Tcol.mt(Y, SigMat = SigMat, lambda = lambda, nrand = nrand,
+                                        ncores = ncores, rng_method = rng_method,
+                                        is.group.sig = is.group.sig, is.group.cor = is.group.cor),
+    Tcol.st = SecAct.inference.Tcol.st(Y, SigMat = SigMat, lambda = lambda, nrand = nrand,
+                                        rng_method = rng_method,
+                                        is.group.sig = is.group.sig, is.group.cor = is.group.cor),
+    Yrow.mt = SecAct.inference.Yrow.mt(Y, SigMat = SigMat, lambda = lambda, nrand = nrand,
+                                        ncores = ncores, rng_method = rng_method,
+                                        is.group.sig = is.group.sig, is.group.cor = is.group.cor),
+    Yrow.st = SecAct.inference.Yrow.st(Y, SigMat = SigMat, lambda = lambda, nrand = nrand,
+                                        rng_method = rng_method,
+                                        is.group.sig = is.group.sig, is.group.cor = is.group.cor),
+    naive   = SecAct.inference.naive(Y, SigMat = SigMat, lambda = lambda, nrand = nrand,
+                                      rng_method = rng_method,
+                                      is.group.sig = is.group.sig, is.group.cor = is.group.cor),
+    gsl.old = SecAct.inference.gsl.old(Y, SigMat = SigMat, lambda = lambda, nrand = nrand,
+                                        rng_method = rng_method,
+                                        is.group.sig = is.group.sig, is.group.cor = is.group.cor)
+  )
+}
+
+
+# =========================================================
+# Individual backends
+# =========================================================
+
+#' @title Secreted protein activity inference (Legacy)
+#' @description Single-threaded legacy implementation using .C interface (32-bit indexing).
+#'   Preserved for backward compatibility and macOS stability.
+#' @param Y Gene expression matrix.
+#' @param SigMat Secreted protein signature matrix.
+#' @param lambda Penalty factor.
+#' @param nrand Number of randomizations.
+#' @param rng_method RNG method: "srand" (default) or "gsl".
+#' @param is.group.sig Logical; group correlated signatures before regression (default TRUE).
+#' @param is.group.cor Correlation threshold for grouping (default 0.9).
+#' @export
+SecAct.inference.gsl.old <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand = 1000,
+                                     rng_method = "srand", is.group.sig = TRUE, is.group.cor = 0.9)
+{
+  if (SigMat == "SecAct") {
+    Xfile <- file.path(system.file(package = "SecAct"), "extdata/SecAct.tsv.gz")
+    X <- read.table(Xfile, sep = "\t", check.names = FALSE)
+  } else {
+    X <- read.table(SigMat, sep = "\t", check.names = FALSE)
+  }
+
+  if (is.group.sig) {
+    X <- group_signatures(X, cor_threshold = is.group.cor)
+  }
+
+  rng_int <- match.arg(rng_method, c("srand", "gsl"))
+  rng_int <- ifelse(rng_int == "gsl", 1L, 0L)
+
+  olp <- intersect(row.names(Y), row.names(X))
+  X <- as.matrix(X[olp, , drop = FALSE])
+  Y <- as.matrix(Y[olp, , drop = FALSE])
+  X <- scale(X); Y <- scale(Y)
+  X[is.na(X)] <- 0; Y[is.na(Y)] <- 0
+
+  n <- length(olp); p <- ncol(X); m <- ncol(Y)
+
+  res <- .C("ridgeReg",
+            X = as.double(t(X)),
+            Y = as.double(t(Y)),
+            as.integer(n), as.integer(p), as.integer(m),
+            as.double(lambda), as.double(nrand),
+            beta = double(p * m), se = double(p * m),
+            zscore = double(p * m), pvalue = double(p * m),
+            rng_method = as.integer(rng_int)
+  )
+
+  formatter <- function(v) matrix(v, byrow = TRUE, ncol = m, dimnames = list(colnames(X), colnames(Y)))
+  result <- list(beta = formatter(res$beta), se = formatter(res$se),
+                 zscore = formatter(res$zscore), pvalue = formatter(res$pvalue))
+
+  if (is.group.sig) {
+    result$beta   <- expand_rows(result$beta)
+    result$se     <- expand_rows(result$se)
+    result$zscore <- expand_rows(result$zscore)
+    result$pvalue <- expand_rows(result$pvalue)
+    ord <- sort(rownames(result$beta))
+    result$beta   <- result$beta[ord, , drop = FALSE]
+    result$se     <- result$se[ord, , drop = FALSE]
+    result$zscore <- result$zscore[ord, , drop = FALSE]
+    result$pvalue <- result$pvalue[ord, , drop = FALSE]
+  }
+
+  result
+}
+
+#' @title Secreted protein activity inference (Optimized dispatcher)
+#' @description Dispatches to one of 4 optimized .Call variants. For platform-aware
+#'   auto-selection use \code{SecAct.inference()}.
+#' @param Y Gene expression matrix.
+#' @param SigMat Secreted protein signature matrix.
+#' @param lambda Penalty factor.
+#' @param nrand Number of randomizations.
+#' @param ncores Number of cores (NULL = auto-detect; multi-threaded variants only).
+#' @param rng_method RNG method: "srand" (default) or "gsl".
+#' @param method Variant: "Tcol.mt" (default), "Tcol.st", "Yrow.mt", or "Yrow.st".
+#' @param is.group.sig Logical; group correlated signatures before regression (default TRUE).
+#' @param is.group.cor Correlation threshold for grouping (default 0.9).
+#' @export
+SecAct.inference.gsl.new <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand = 1000,
+                                     ncores = NULL, rng_method = "srand", method = "Tcol.mt",
+                                     is.group.sig = TRUE, is.group.cor = 0.9)
+{
+  method <- match.arg(method, c("Tcol.mt", "Tcol.st", "Yrow.mt", "Yrow.st"))
+
+  switch(method,
+    Tcol.mt = SecAct.inference.Tcol.mt(Y, SigMat = SigMat, lambda = lambda, nrand = nrand,
+                                        ncores = ncores, rng_method = rng_method,
+                                        is.group.sig = is.group.sig, is.group.cor = is.group.cor),
+    Tcol.st = SecAct.inference.Tcol.st(Y, SigMat = SigMat, lambda = lambda, nrand = nrand,
+                                        rng_method = rng_method,
+                                        is.group.sig = is.group.sig, is.group.cor = is.group.cor),
+    Yrow.mt = SecAct.inference.Yrow.mt(Y, SigMat = SigMat, lambda = lambda, nrand = nrand,
+                                        ncores = ncores, rng_method = rng_method,
+                                        is.group.sig = is.group.sig, is.group.cor = is.group.cor),
+    Yrow.st = SecAct.inference.Yrow.st(Y, SigMat = SigMat, lambda = lambda, nrand = nrand,
+                                        rng_method = rng_method,
+                                        is.group.sig = is.group.sig, is.group.cor = is.group.cor)
+  )
+}
+
+
+# =========================================================
+# 5 Optimized Variants
 # =========================================================
 
 #' @title Y-row permutation, single-threaded (.Call)
-#' @description Single-threaded Y-row permutation using .Call interface (64-bit indexing).
 #' @param Y Gene expression matrix (genes x samples).
 #' @param SigMat Signature matrix: "SecAct" (bundled) or path to file.
 #' @param lambda Ridge regularization parameter.
@@ -209,7 +291,7 @@ SecAct.inference.Yrow.st <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand
                pre$X, pre$Y,
                as.numeric(lambda),
                as.integer(nrand),
-               1L,  # ncores = 1 (single-threaded)
+               1L,
                as.integer(pre$rng_int))
 
   result <- .secact_format_call(res, pre$X, pre$Y)
@@ -217,7 +299,6 @@ SecAct.inference.Yrow.st <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand
 }
 
 #' @title Y-row permutation, multi-threaded (.Call)
-#' @description Multi-threaded Y-row permutation using .Call interface with OpenMP.
 #' @param Y Gene expression matrix (genes x samples).
 #' @param SigMat Signature matrix: "SecAct" (bundled) or path to file.
 #' @param lambda Ridge regularization parameter.
@@ -233,9 +314,7 @@ SecAct.inference.Yrow.mt <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand
 {
   pre <- .secact_preprocess(Y, SigMat, is.group.sig, is.group.cor, rng_method)
 
-  if (is.null(ncores)) {
-    ncores <- parallel::detectCores(logical = FALSE)
-  }
+  if (is.null(ncores)) ncores <- parallel::detectCores(logical = FALSE)
 
   res <- .Call("ridgeRegFast_interface",
                pre$X, pre$Y,
@@ -249,7 +328,6 @@ SecAct.inference.Yrow.mt <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand
 }
 
 #' @title T-column permutation, single-threaded (.Call)
-#' @description Single-threaded T-column permutation using .Call interface.
 #' @param Y Gene expression matrix (genes x samples).
 #' @param SigMat Signature matrix: "SecAct" (bundled) or path to file.
 #' @param lambda Ridge regularization parameter.
@@ -267,7 +345,7 @@ SecAct.inference.Tcol.st <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand
                pre$X, pre$Y,
                as.numeric(lambda),
                as.integer(nrand),
-               1L,  # ncores = 1 (single-threaded)
+               1L,
                as.integer(pre$rng_int))
 
   result <- .secact_format_call(res, pre$X, pre$Y)
@@ -275,7 +353,6 @@ SecAct.inference.Tcol.st <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand
 }
 
 #' @title T-column permutation, multi-threaded (.Call)
-#' @description Multi-threaded T-column permutation using .Call interface with OpenMP.
 #' @param Y Gene expression matrix (genes x samples).
 #' @param SigMat Signature matrix: "SecAct" (bundled) or path to file.
 #' @param lambda Ridge regularization parameter.
@@ -291,9 +368,7 @@ SecAct.inference.Tcol.mt <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand
 {
   pre <- .secact_preprocess(Y, SigMat, is.group.sig, is.group.cor, rng_method)
 
-  if (is.null(ncores)) {
-    ncores <- parallel::detectCores(logical = FALSE)
-  }
+  if (is.null(ncores)) ncores <- parallel::detectCores(logical = FALSE)
 
   res <- .Call("ridgeRegFastTcol_interface",
                pre$X, pre$Y,
@@ -307,8 +382,6 @@ SecAct.inference.Tcol.mt <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand
 }
 
 #' @title Pure R naive implementation with C-generated permutation table
-#' @description Pure R linear algebra with C-generated permutation table for
-#'   identical RNG sequences. Uses T-column permutation approach.
 #' @param Y Gene expression matrix (genes x samples).
 #' @param SigMat Signature matrix: "SecAct" (bundled) or path to file.
 #' @param lambda Ridge regularization parameter.
@@ -324,56 +397,47 @@ SecAct.inference.naive <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand =
   X <- pre$X
   Y <- pre$Y
 
-  n <- nrow(X)
-  p <- ncol(X)
-  m <- ncol(Y)
+  n <- nrow(X); p <- ncol(X); m <- ncol(Y)
 
-  # 1. Compute projection matrix: T = (X'X + lambda*I)^-1 X'
+  # 1. Projection matrix: T = (X'X + lambda*I)^-1 X'
   T_mat <- solve(crossprod(X) + lambda * diag(p), t(X))  # (p x n)
 
   # 2. Observed beta
   beta <- T_mat %*% Y  # (p x m)
 
-  # 3. Get permutation table from C (same RNG sequence)
+  # 3. Permutation table from C (same RNG sequence as C backends)
   perm_table <- .Call("generate_perm_table",
                       as.integer(n),
                       as.integer(nrand),
                       as.integer(pre$rng_int))
-  # perm_table is (nrand x n) integer matrix, 0-indexed
+  # perm_table: (nrand x n) integer matrix, 0-indexed
 
-  # 4. Permutation loop (T-column approach in pure R)
-  aver <- matrix(0.0, nrow = p, ncol = m)
-  aver_sq <- matrix(0.0, nrow = p, ncol = m)
+  # 4. Permutation loop (T-column approach)
+  aver          <- matrix(0.0, nrow = p, ncol = m)
+  aver_sq       <- matrix(0.0, nrow = p, ncol = m)
   pvalue_counts <- matrix(0.0, nrow = p, ncol = m)
-  abs_beta <- abs(beta)
+  abs_beta      <- abs(beta)
 
   for (i in seq_len(nrand)) {
-    # Forward permutation from table (0-indexed -> 1-indexed)
     fwd_perm <- perm_table[i, ] + 1L
-
-    # Compute inverse permutation: inv_perm[fwd_perm[j]] = j
     inv_perm <- integer(n)
     inv_perm[fwd_perm] <- seq_len(n)
-
-    # T-column permutation: permute columns of T
-    beta_rand <- T_mat[, inv_perm, drop = FALSE] %*% Y
-
+    beta_rand     <- T_mat[, inv_perm, drop = FALSE] %*% Y
     pvalue_counts <- pvalue_counts + (abs(beta_rand) >= abs_beta) * 1.0
-    aver <- aver + beta_rand
-    aver_sq <- aver_sq + beta_rand^2
+    aver          <- aver    + beta_rand
+    aver_sq       <- aver_sq + beta_rand^2
   }
 
-  # 5. Finalize statistics (same formula as C)
+  # 5. Finalize
   mean_rand <- aver / nrand
-  var_rand <- (aver_sq / nrand) - mean_rand^2
+  var_rand  <- (aver_sq / nrand) - mean_rand^2
   var_rand[var_rand < 0] <- 0
-  se <- sqrt(var_rand)
+  se     <- sqrt(var_rand)
   zscore <- ifelse(se > 1e-12, (beta - mean_rand) / se, 0.0)
   pvalue <- (pvalue_counts + 1.0) / (nrand + 1.0)
 
-  # Format output
-  rownames(beta) <- colnames(X); colnames(beta) <- colnames(Y)
-  rownames(se) <- colnames(X); colnames(se) <- colnames(Y)
+  rownames(beta)   <- colnames(X); colnames(beta)   <- colnames(Y)
+  rownames(se)     <- colnames(X); colnames(se)     <- colnames(Y)
   rownames(zscore) <- colnames(X); colnames(zscore) <- colnames(Y)
   rownames(pvalue) <- colnames(X); colnames(pvalue) <- colnames(Y)
 

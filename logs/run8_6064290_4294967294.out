@@ -1,0 +1,31 @@
+[1] 8
+[1] "n = 1"
+   user  system elapsed 
+ 27.513   0.240  27.881 
+   user  system elapsed 
+ 15.010   0.067  15.120 
+[1] "n = 10"
+   user  system elapsed 
+ 30.732   0.097  30.899 
+   user  system elapsed 
+ 19.745   0.162  19.958 
+[1] "n = 100"
+   user  system elapsed 
+ 64.439   0.079  64.645 
+   user  system elapsed 
+ 50.189   0.160  38.384 
+[1] "n = 1000"
+   user  system elapsed 
+371.255   0.211 372.278 
+   user  system elapsed 
+670.872   1.060 102.793 
+[1] "n = 10000"
+    user   system  elapsed 
+3326.751    0.817 3334.575 
+    user   system  elapsed 
+6656.811    8.086  855.040 
+[1] "n = 100000"
+     user    system   elapsed 
+32705.317    12.995 32777.812 
+     user    system   elapsed 
+66085.964    28.438  8358.314 

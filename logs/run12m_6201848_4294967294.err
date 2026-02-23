@@ -1,0 +1,35 @@
+[+] Loading gcc  11.3.0  ... 
+[+] Loading HDF5  1.12.2 
+[+] Loading netcdf  4.9.0 
+[-] Unloading gcc  11.3.0  ... 
+[+] Loading gcc  11.3.0  ... 
+[+] Loading openmpi/4.1.3/gcc-11.3.0  ... 
+[+] Loading pandoc  2.18  on cn0119 
+[+] Loading TeX 2024 
+[+] Loading pcre2  10.40 
+[+] Loading libtiff libraries v4.6.0  ... 
+[+] Loading R 4.5.0 
+[INFO] Please allocate lscratch for batch/sinteractive R jobs
+	Command being timed: "Rscript tmp_new_m.R"
+	User time (seconds): 1050913.07
+	System time (seconds): 18717.44
+	Percent of CPU this job got: 1175%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 25:16:58
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 302683524
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 89
+	Minor (reclaiming a frame) page faults: 18062534594
+	Voluntary context switches: 18068
+	Involuntary context switches: 268527879
+	Swaps: 0
+	File system inputs: 30816
+	File system outputs: 32
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
