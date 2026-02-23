@@ -22,18 +22,54 @@ The package has been installed successfully on Operating Systems:
 
 ## Functions
 
-### Main function
+### User-facing API (SecAct-compatible)
 
-`SecAct.inference.gsl.new` is the primary interface. It dispatches to one of 4 optimized C backends via the `method` parameter:
+These functions provide a drop-in replacement for the [SecAct R package](https://github.com/data2intelligence/SecAct) API, powered by RidgeR's optimized C backends:
+
+| Function | Input Type | Description |
+|---|---|---|
+| `SecAct.activity.inference` | Matrix (genes x samples) | Main entry point for bulk expression data. Handles differential/paired/single-sample-level analysis, multiple signature sources (SecAct, CytoSig, SecAct-XXX), and signature filtering. |
+| `SecAct.activity.inference.ST` | SpaCET object | Spatial transcriptomics wrapper. Extracts counts, normalizes to TPM, log-transforms, and computes activity. |
+| `SecAct.activity.inference.scRNAseq` | Seurat object | scRNAseq wrapper. Generates pseudo-bulk by cell type or analyzes single cells. Supports Seurat v5 Assay5. |
 
 ``` r
-SecAct.inference.gsl.new(Y, method = "Tcol.mt")  # default: T-col, multi-threaded
-SecAct.inference.gsl.new(Y, method = "Tcol.st")  # T-col, single-threaded
-SecAct.inference.gsl.new(Y, method = "Yrow.mt")  # Y-row, multi-threaded
-SecAct.inference.gsl.new(Y, method = "Yrow.st")  # Y-row, single-threaded
+library(RidgeR)
+
+# Bulk expression (differential profile)
+res <- SecAct.activity.inference(expr.diff, is.differential = TRUE)
+
+# Bulk expression (case vs control)
+res <- SecAct.activity.inference(expr_case, inputProfile_control = expr_ctrl)
+
+# Spatial transcriptomics (SpaCET object)
+spacet_obj <- SecAct.activity.inference.ST(spacet_obj)
+
+# Single-cell RNA-seq (Seurat object)
+seurat_obj <- SecAct.activity.inference.scRNAseq(seurat_obj, cellType_meta = "cell_type")
 ```
 
-### All variants
+### Platform-aware inference engine
+
+`SecAct.inference` is the unified entry point that automatically selects the best backend for the current platform. It is called internally by `SecAct.activity.inference` but can also be used directly with pre-processed data:
+
+``` r
+# Auto-select best backend
+res <- SecAct.inference(expr.diff)
+
+# Force a specific backend
+res <- SecAct.inference(expr.diff, method = "Tcol.mt", ncores = 8)
+res <- SecAct.inference(expr.diff, method = "gsl.old")
+```
+
+Platform defaults:
+
+| Platform | Default Backend | Reason |
+|---|---|---|
+| Linux | `Tcol.mt` (multi-threaded) | Full OpenMP support |
+| macOS | `Tcol.st` (single-threaded) | OpenMP unreliable without libomp |
+| Windows | `Tcol.mt` (multi-threaded) | OpenMP via Rtools |
+
+### All backend variants
 
 | # | Function | Permutation | Threading | Interface | Description |
 |---|----------|-------------|-----------|-----------|-------------|
@@ -44,25 +80,45 @@ SecAct.inference.gsl.new(Y, method = "Yrow.st")  # Y-row, single-threaded
 | 5 | `SecAct.inference.Tcol.mt` | T-col | Multi (OMP) | `.Call` | Multi-threaded T-col permutation |
 | — | `SecAct.inference.gsl.old` | Y-row | Single | `.C` (legacy, 32-bit) | Legacy single-threaded (preserved) |
 | — | `SecAct.inference.gsl.new` | Dispatches | Dispatches | `.Call` (64-bit) | Dispatcher (default: `method="Tcol.mt"`) |
+| — | `SecAct.inference` | Auto | Auto | Dispatches | Platform-aware wrapper (recommended) |
 
 **Permutation strategies:**
 
 - **Y-row**: Permutes rows of the response matrix Y, then multiplies T * Y_perm. Parallelizes over sample strips.
 - **T-col**: Permutes columns of the projection matrix T, then multiplies T_perm * Y. Mathematically equivalent (`T[:, inv_perm] @ Y == T @ Y[perm, :]`). Parallelizes over permutations. Matches [SecActPy](https://github.com/data2intelligence/SecActpy) approach.
 
-**Legacy:** `gsl.old` is preserved for backward compatibility. `gsl.new` now dispatches to the 4 variants (previously it was Y-row multi-threaded only).
-
 ### Key Parameters
+
+#### SecAct.activity.inference
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `inputProfile` | — | Gene expression matrix (genes x samples), or differential profile |
+| `inputProfile_control` | `NULL` | Control expression matrix for differential analysis |
+| `is.differential` | `FALSE` | Whether inputProfile is already a differential profile |
+| `is.paired` | `FALSE` | Paired differential between inputProfile and control |
+| `is.singleSampleLevel` | `FALSE` | Per-sample activity (TRUE) vs overall change (FALSE) |
+| `sigMatrix` | `"SecAct"` | Signature: `"SecAct"`, `"CytoSig"`, `"SecAct-Breast"`, ..., or file path |
+| `is.filter.sig` | `FALSE` | Filter signatures to genes present in inputProfile |
+| `is.group.sig` | `TRUE` | Group correlated signatures before regression |
+| `is.group.cor` | `0.9` | Correlation threshold for signature grouping |
+| `lambda` | `5e+05` | Ridge regularization parameter (NULL for auto-selection) |
+| `nrand` | `1000` | Number of permutations |
+| `ncores` | `NULL` | CPU cores for multi-threaded variants (NULL = auto-detect) |
+| `rng_method` | `"srand"` | RNG: `"srand"` (C stdlib) or `"gsl"` (cross-platform) |
+| `method` | `"auto"` | Backend: `"auto"`, `"Tcol.mt"`, `"Tcol.st"`, `"Yrow.mt"`, `"Yrow.st"`, `"naive"`, `"gsl.old"` |
+
+#### SecAct.inference
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `Y` | — | Gene expression matrix (genes x samples) |
-| `SigMat` | `"SecAct"` | Signature matrix: `"SecAct"` (bundled) or path to file |
+| `SigMat` | `"SecAct"` | Signature matrix: `"SecAct"`, path to file, or pre-loaded matrix/data.frame |
 | `lambda` | `5e+05` | Ridge regularization parameter |
 | `nrand` | `1000` | Number of permutations |
 | `ncores` | `NULL` | Number of CPU cores (`NULL` = auto-detect; multi-threaded variants only) |
 | `rng_method` | `"srand"` | RNG backend: `"srand"` (C stdlib, matches R SecAct) or `"gsl"` (cross-platform GSL MT19937) |
-| `method` | `"Tcol.mt"` | Backend variant: `"Tcol.mt"`, `"Tcol.st"`, `"Yrow.mt"`, or `"Yrow.st"` (`gsl.new` only) |
+| `method` | `"auto"` | Backend: `"auto"`, `"Tcol.mt"`, `"Tcol.st"`, `"Yrow.mt"`, `"Yrow.st"`, `"naive"`, `"gsl.old"` |
 | `is.group.sig` | `TRUE` | Group correlated signatures before regression |
 | `is.group.cor` | `0.9` | Correlation threshold for signature grouping |
 
@@ -73,6 +129,12 @@ library(RidgeR)
 
 dataPath <- file.path(system.file(package = "RidgeR"), "extdata/")
 expr.diff <- read.table(paste0(dataPath, "Ly86-Fc_vs_Vehicle_logFC.txt"))
+
+# ---- Recommended: platform-aware auto-selection ----
+res <- SecAct.activity.inference(expr.diff, is.differential = TRUE)
+
+# ---- Or use SecAct.inference directly ----
+res <- SecAct.inference(expr.diff)
 
 # ---- Compare all variants ----
 t_naive   <- system.time({res.naive   <- SecAct.inference.naive(expr.diff)})
@@ -93,21 +155,26 @@ cat("naive:", t_naive[3], "Yrow.st:", t_yrow_st[3], "Tcol.st:", t_tcol_st[3],
 
 ## Compatibility with R SecAct
 
-RidgeR's `is.group.sig` parameter controls signature grouping. The original
-[R SecAct](https://github.com/data2intelligence/SecAct) package has different
-functions with and without grouping:
+RidgeR provides drop-in replacements for the [SecAct R package](https://github.com/data2intelligence/SecAct) functions:
 
-| R SecAct Function | Grouping | RidgeR Equivalent |
-|---|---|---|
-| `SecAct.inference.gsl` | No | `SecAct.inference.gsl.new(Y, is.group.sig = FALSE)` |
-| `SecAct.activity.inference(Y, is.differential = TRUE)` | Yes (default) | `SecAct.inference.gsl.new(Y, is.group.sig = TRUE)` |
+| SecAct Function | RidgeR Equivalent |
+|---|---|
+| `SecAct.activity.inference(...)` | `SecAct.activity.inference(...)` (same API + `method`/`ncores`/`rng_method` params) |
+| `SecAct.activity.inference.ST(...)` | `SecAct.activity.inference.ST(...)` |
+| `SecAct.activity.inference.scRNAseq(...)` | `SecAct.activity.inference.scRNAseq(...)` |
+| `SecAct.inference.gsl(Y)` | `SecAct.inference(Y, is.group.sig = FALSE)` |
+
+The RidgeR versions add platform-aware backend selection (`method`), multi-threading (`ncores`), and cross-platform RNG (`rng_method`) while preserving the same preprocessing, signature handling, and output format.
 
 ``` r
-# Match SecAct.inference.gsl (no grouping)
-res <- SecAct.inference.gsl.new(expr.diff, is.group.sig = FALSE)
+# Direct drop-in replacement for SecAct.activity.inference
+res <- SecAct.activity.inference(expr, inputProfile_control = ctrl)
 
-# Match SecAct.activity.inference (with grouping, default)
-res <- SecAct.inference.gsl.new(expr.diff, is.group.sig = TRUE)
+# Match SecAct.inference.gsl (no grouping)
+res <- SecAct.inference(expr.diff, is.group.sig = FALSE)
+
+# Match SecAct.activity.inference with grouping (default)
+res <- SecAct.inference(expr.diff, is.group.sig = TRUE)
 ```
 
 ## Reproducibility
@@ -121,10 +188,10 @@ RidgeR supports two RNG backends via the `rng_method` parameter:
 
 ``` r
 # Default: match R SecAct on same platform (C stdlib rand, platform-dependent)
-res <- SecAct.inference.Yrow.mt(expr.diff, rng_method = "srand")
+res <- SecAct.activity.inference(expr.diff, is.differential = TRUE, rng_method = "srand")
 
 # Cross-platform: matches SecActPy rng_method='gsl' on any OS
-res <- SecAct.inference.Yrow.mt(expr.diff, rng_method = "gsl")
+res <- SecAct.activity.inference(expr.diff, is.differential = TRUE, rng_method = "gsl")
 ```
 
 > **Note:** C `rand()` implementations differ across operating systems, so
