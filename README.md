@@ -66,7 +66,7 @@ Platform defaults:
 | Platform | Default Backend | Reason |
 |---|---|---|
 | Linux | `Tcol.mt` (multi-threaded) | Full OpenMP support |
-| macOS | `Tcol.st` (single-threaded) | OpenMP unreliable without libomp |
+| macOS | `Yrow.st` (single-threaded) | OpenMP unreliable without libomp; benefits from vecLib BLAS |
 | Windows | `Tcol.mt` (multi-threaded) | OpenMP via Rtools |
 
 ### All backend variants

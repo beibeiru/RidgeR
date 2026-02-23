@@ -145,7 +145,7 @@ sweep_sparse <- function(m, margin, stats, fun) {
 #'   \code{method} parameter. Platform defaults:
 #'   \itemize{
 #'     \item \strong{Linux}: \code{SecAct.inference.Tcol.mt} — T-column permutation, multi-threaded (fastest)
-#'     \item \strong{macOS}: \code{SecAct.inference.Tcol.st} — legacy single-threaded (OpenMP unreliable without libomp)
+#'     \item \strong{macOS}: \code{SecAct.inference.Yrow.st} — single-threaded (OpenMP unreliable without libomp, veclib)
 #'     \item \strong{Windows}: \code{SecAct.inference.Tcol.mt} — T-column permutation, multi-threaded (OpenMP by Rtools)
 #'   }
 #' @param Y Gene expression matrix (genes x samples).
@@ -184,8 +184,8 @@ SecAct.inference <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand = 1000,
     is_windows <- .Platform$OS.type == "windows"
 
     if (is_mac) {
-      method <- "Tcol.st"   # macOS: OpenMP unreliable without libomp → single-threaded (w veclib blas)
-      message("[SecAct.inference] Platform: macOS -> using Tcol.st")
+      method <- "Yrow.st"   # macOS: OpenMP unreliable without libomp → single-threaded (w veclib blas)
+      message("[SecAct.inference] Platform: macOS -> using Yrow.st")
     } else {
       method <- "Tcol.mt"   # Linux / Windows (Rtools): multi-threaded T-column permutation
       message("[SecAct.inference] Platform: ", ifelse(is_windows, "Windows", "Linux"), " -> using Tcol.mt")
