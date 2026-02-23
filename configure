@@ -22,7 +22,23 @@ if ! "$GSL_CONFIG_EXEC" --version >/dev/null 2>&1; then
 fi
 
 GSL_CFLAGS=$("$GSL_CONFIG_EXEC" --cflags)
-GSL_LIBS=$("$GSL_CONFIG_EXEC" --libs)
+GSL_LIBS_RAW=$("$GSL_CONFIG_EXEC" --libs)
+
+# Replace GSL's reference CBLAS with R's BLAS (MKL, Accelerate, OpenBLAS, etc.)
+# GSL's gsl_blas_* are thin wrappers around standard CBLAS — any conforming
+# BLAS implementation works. The reference -lgslcblas is unoptimized; R's BLAS
+# is always tuned for the platform (MKL on Linux, Accelerate on macOS, etc.)
+R_BLAS_LIBS=$(R CMD config BLAS_LIBS 2>/dev/null)
+if [ -n "$R_BLAS_LIBS" ]; then
+    # Drop -lgslcblas, substitute R's BLAS
+    GSL_LIBS=$(echo "$GSL_LIBS_RAW" | sed 's/-lgslcblas//g')
+    GSL_LIBS="$GSL_LIBS $R_BLAS_LIBS"
+    echo "  Using R's BLAS instead of GSL CBLAS: $R_BLAS_LIBS"
+else
+    # Fallback: keep GSL's reference CBLAS
+    GSL_LIBS="$GSL_LIBS_RAW"
+    echo "  Warning: Could not detect R's BLAS, falling back to GSL CBLAS"
+fi
 
 # ===========================================================================
 # 2. OPENMP DETECTION
