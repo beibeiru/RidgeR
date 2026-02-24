@@ -20,6 +20,47 @@ The package has been installed successfully on Operating Systems:
 - macOS Sequoia 15.3.1
 - Windows 10
 
+### Troubleshooting: GSL not found on macOS
+
+If you see this error during installation:
+
+```
+Checking for GSL...
+ERROR: GSL is not installed or gsl-config is not found.
+ERROR: configuration failed for package 'RidgeR'
+```
+
+Install GSL using [Homebrew](https://brew.sh/):
+
+``` bash
+brew install gsl
+```
+
+After installation, verify that `gsl-config` is available:
+
+``` bash
+gsl-config --version
+```
+
+Then retry installing RidgeR. If `gsl-config` is still not found after
+installing GSL (e.g., Homebrew is not in your PATH), you can set the
+path explicitly before installing:
+
+``` r
+Sys.setenv(PATH = paste("/opt/homebrew/bin", Sys.getenv("PATH"), sep = ":"))
+devtools::install_github("beibeiru/RidgeR")
+```
+
+For **OpenMP** multi-threading support (optional), also install
+`libomp`:
+
+``` bash
+brew install libomp
+```
+
+Without `libomp`, RidgeR will still work but will default to
+single-threaded backends on macOS.
+
 ## Functions
 
 ### User-facing API (SecAct-compatible)
