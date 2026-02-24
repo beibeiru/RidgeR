@@ -74,7 +74,7 @@ sweep_sparse <- function(m, margin, stats, fun) {
   if (is.matrix(SigMat) || is.data.frame(SigMat)) {
     X <- as.data.frame(SigMat)
   } else if (SigMat == "SecAct") {
-    Xfile <- file.path(system.file(package = "SecAct"), "extdata/SecAct.tsv.gz")
+    Xfile <- file.path(system.file(package = "RidgeR"), "extdata/SecAct.tsv.gz")
     X <- read.table(Xfile, sep = "\t", check.names = FALSE)
   } else {
     X <- read.table(SigMat, sep = "\t", check.names = FALSE)
@@ -237,7 +237,7 @@ SecAct.inference.gsl.old <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand
   if (is.matrix(SigMat) || is.data.frame(SigMat)) {
     X <- as.data.frame(SigMat)
   } else if (SigMat == "SecAct") {
-    Xfile <- file.path(system.file(package = "SecAct"), "extdata/SecAct.tsv.gz")
+    Xfile <- file.path(system.file(package = "RidgeR"), "extdata/SecAct.tsv.gz")
     X <- read.table(Xfile, sep = "\t", check.names = FALSE)
   } else {
     X <- read.table(SigMat, sep = "\t", check.names = FALSE)
@@ -577,7 +577,7 @@ SecAct.activity.inference <- function(
 
   # --- Load signature matrix ---
   if (sigMatrix == "SecAct") {
-    Xfile <- file.path(system.file(package = "SecAct"), "extdata/SecAct.tsv.gz")
+    Xfile <- file.path(system.file(package = "RidgeR"), "extdata/SecAct.tsv.gz")
     X <- read.table(Xfile, sep = "\t", check.names = FALSE)
     if (is.null(lambda)) lambda <- 5e+05
   } else if (grepl("SecAct-", sigMatrix, fixed = TRUE)) {
