@@ -239,13 +239,11 @@ void ridgeRegFast_core(
   double *beta_vec, double *se_vec, double *zscore_vec, double *pvalue_vec,
   int num_threads, int rng_method)
 {
-#ifdef _OPENMP
-  if (num_threads > 0) omp_set_num_threads(num_threads);
-#endif
+  /* Defer omp_set_num_threads() to just before the parallel region.
+     Calling it for the single-threaded path (num_threads == 1)
+     triggers libgomp CPU-affinity pinning, which forces OpenBLAS's
+     internal pthreads onto one core → catastrophic slowdown. */
 
-  /* Transposed-view trick: R stores X(n×p) column-major.
-     GSL reads row-major. Mapping X_ptr as (p×n) gives GSL exactly X'.
-     Mapping Y_ptr as (m×n) gives GSL exactly Y'. */
   gsl_matrix *Xt   = RVectorObject_to_gsl_matrix(X_ptr,    p, n);
   gsl_matrix *Yt   = RVectorObject_to_gsl_matrix(Y_ptr,    m, n);
   gsl_matrix *beta = RVectorObject_to_gsl_matrix(beta_vec, p, m);
@@ -333,6 +331,7 @@ void ridgeRegFast_core(
        the Y_block construction overhead across threads.
        ------------------------------------------------------- */
 #ifdef _OPENMP
+    if (num_threads > 0) omp_set_num_threads(num_threads);
     #pragma omp parallel
     {
       gsl_matrix *Y_block    = gsl_matrix_alloc(n, SAMPLE_STRIP_SIZE * PERM_BATCH_SIZE);
@@ -424,9 +423,8 @@ void ridgeRegFastTcol_core(
   double *beta_vec, double *se_vec, double *zscore_vec, double *pvalue_vec,
   int num_threads, int rng_method)
 {
-#ifdef _OPENMP
-  if (num_threads > 0) omp_set_num_threads(num_threads);
-#endif
+  /* Defer omp_set_num_threads() to just before the parallel region.
+     See Yrow core comment for rationale. */
 
   gsl_matrix *Xt   = RVectorObject_to_gsl_matrix(X_ptr,    p, n);
   gsl_matrix *Yt   = RVectorObject_to_gsl_matrix(Y_ptr,    m, n);
@@ -522,6 +520,7 @@ void ridgeRegFastTcol_core(
        into shared pvalue/zscore/se output arrays.
        ------------------------------------------------------- */
 #ifdef _OPENMP
+    if (num_threads > 0) omp_set_num_threads(num_threads);
     #pragma omp parallel
     {
       gsl_matrix *T_perm     = gsl_matrix_alloc(p, n);

@@ -332,7 +332,7 @@ SecAct.inference.gsl.new <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand
 #' @param SigMat Signature matrix: "SecAct" (bundled) or path to file.
 #' @param lambda Ridge regularization parameter.
 #' @param nrand Number of permutations.
-#' @param rng_method RNG method: "srand" or "gsl".
+#' @param rng_method RNG method: "srand" (default) or "gsl".
 #' @param is.group.sig Group correlated signatures before regression.
 #' @param is.group.cor Correlation threshold for grouping.
 #' @export
@@ -358,7 +358,7 @@ SecAct.inference.Yrow.st <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand
 #' @param lambda Ridge regularization parameter.
 #' @param nrand Number of permutations.
 #' @param ncores Number of CPU cores (NULL = auto-detect).
-#' @param rng_method RNG method: "srand" or "gsl".
+#' @param rng_method RNG method: "srand" (default) or "gsl".
 #' @param is.group.sig Group correlated signatures before regression.
 #' @param is.group.cor Correlation threshold for grouping.
 #' @export
@@ -386,7 +386,7 @@ SecAct.inference.Yrow.mt <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand
 #' @param SigMat Signature matrix: "SecAct" (bundled) or path to file.
 #' @param lambda Ridge regularization parameter.
 #' @param nrand Number of permutations.
-#' @param rng_method RNG method: "srand" or "gsl".
+#' @param rng_method RNG method: "srand" (default) or "gsl".
 #' @param is.group.sig Group correlated signatures before regression.
 #' @param is.group.cor Correlation threshold for grouping.
 #' @export
@@ -412,7 +412,7 @@ SecAct.inference.Tcol.st <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand
 #' @param lambda Ridge regularization parameter.
 #' @param nrand Number of permutations.
 #' @param ncores Number of CPU cores (NULL = auto-detect).
-#' @param rng_method RNG method: "srand" or "gsl".
+#' @param rng_method RNG method: "srand" (default) or "gsl".
 #' @param is.group.sig Group correlated signatures before regression.
 #' @param is.group.cor Correlation threshold for grouping.
 #' @export
@@ -440,7 +440,7 @@ SecAct.inference.Tcol.mt <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand
 #' @param SigMat Signature matrix: "SecAct" (bundled) or path to file.
 #' @param lambda Ridge regularization parameter.
 #' @param nrand Number of permutations.
-#' @param rng_method RNG method: "srand" or "gsl".
+#' @param rng_method RNG method: "srand" (default) or "gsl".
 #' @param is.group.sig Group correlated signatures before regression.
 #' @param is.group.cor Correlation threshold for grouping.
 #' @export
