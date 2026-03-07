@@ -5,6 +5,15 @@
 #include <gsl/gsl_blas.h>
 #include <gsl/gsl_linalg.h>
 #include <gsl/gsl_rng.h>
+#include <gsl/gsl_version.h>
+
+/* gsl_linalg_cholesky_decomp was deprecated in GSL 2.6;
+   use gsl_linalg_cholesky_decomp1 when available.           */
+#if GSL_MAJOR_VERSION > 2 || (GSL_MAJOR_VERSION == 2 && GSL_MINOR_VERSION >= 6)
+#define CHOLESKY_DECOMP gsl_linalg_cholesky_decomp1
+#else
+#define CHOLESKY_DECOMP gsl_linalg_cholesky_decomp
+#endif
 #include <string.h>
 #include <time.h>
 #include <math.h>
@@ -150,7 +159,7 @@ void ridgeReg(
   /* Projection: T = (X'X + lambda*I)^-1 * X' */
   gsl_matrix_set_identity(I);
   gsl_blas_dsyrk(CblasLower, CblasTrans, 1.0, X, lambda, I);
-  gsl_linalg_cholesky_decomp(I);
+  CHOLESKY_DECOMP(I);
   gsl_linalg_cholesky_invert(I);
   gsl_blas_dgemm(CblasNoTrans, CblasTrans, 1.0, I, X, 0.0, T);
 
@@ -254,7 +263,7 @@ void ridgeRegFast_core(
   /* Projection: T = (X'X + lambda*I)^-1 * X' */
   gsl_matrix_set_identity(I_mat);
   gsl_blas_dsyrk(CblasLower, CblasNoTrans, 1.0, Xt, lambda, I_mat);
-  gsl_linalg_cholesky_decomp(I_mat);
+  CHOLESKY_DECOMP(I_mat);
   gsl_linalg_cholesky_invert(I_mat);
   gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, I_mat, Xt, 0.0, T);
 
@@ -436,7 +445,7 @@ void ridgeRegFastTcol_core(
   /* Projection: T = (X'X + lambda*I)^-1 * X' */
   gsl_matrix_set_identity(I_mat);
   gsl_blas_dsyrk(CblasLower, CblasNoTrans, 1.0, Xt, lambda, I_mat);
-  gsl_linalg_cholesky_decomp(I_mat);
+  CHOLESKY_DECOMP(I_mat);
   gsl_linalg_cholesky_invert(I_mat);
   gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, I_mat, Xt, 0.0, T);
 
