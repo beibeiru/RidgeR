@@ -3,21 +3,23 @@ group_signatures <- function(X, cor_threshold = 0.9) {
   dis <- as.dist(1 - cor(X, method = "pearson"))
   hc <- hclust(dis, method = "complete")
   group_labels <- cutree(hc, h = 1 - cor_threshold)
-  newsig <- data.frame(row.names = rownames(X))
-  for (j in unique(group_labels)) {
-    geneGroups <- names(group_labels)[group_labels == j]
-    newsig[, paste0(geneGroups, collapse = "|")] <- rowMeans(X[, geneGroups, drop = FALSE])
+  split_names <- split(names(group_labels), group_labels)
+  col_names <- vapply(split_names, paste0, character(1), collapse = "|")
+  newsig <- matrix(NA_real_, nrow = nrow(X), ncol = length(split_names),
+                   dimnames = list(rownames(X), col_names))
+  for (i in seq_along(split_names)) {
+    newsig[, i] <- rowMeans(X[, split_names[[i]], drop = FALSE])
   }
-  as.data.frame(newsig)
+  newsig
 }
 
 #' @keywords internal
 expand_rows <- function(mat) {
-  new_rows <- lapply(1:nrow(mat), function(i) {
-    names <- strsplit(rownames(mat)[i], "\\|")[[1]]
-    `rownames<-`(do.call(rbind, replicate(length(names), mat[i, , drop = FALSE], simplify = FALSE)), names)
-  })
-  do.call(rbind, new_rows)
+  splits <- strsplit(rownames(mat), "\\|")
+  idx <- rep(seq_len(nrow(mat)), times = lengths(splits))
+  result <- mat[idx, , drop = FALSE]
+  rownames(result) <- unlist(splits)
+  result
 }
 
 #' @keywords internal
@@ -40,14 +42,11 @@ rm_duplicates <- function(mat) {
   if (length(gene_dupl) > 0) {
     gene_unique <- names(gene_count)[gene_count == 1]
     gene_unique_index <- which(rownames(mat) %in% gene_unique)
-    gene_dupl_index <- c()
-    for (gene in gene_dupl) {
-      gene_dupl_index_gene <- which(rownames(mat) %in% gene)
-      mat_dupl_gene <- mat[gene_dupl_index_gene, ]
-      dupl_sum <- Matrix::rowSums(mat_dupl_gene)
-      max_flag <- which(dupl_sum == max(dupl_sum))
-      gene_dupl_index <- c(gene_dupl_index, gene_dupl_index_gene[max_flag[1]])
-    }
+    gene_dupl_index <- vapply(gene_dupl, function(gene) {
+      idx <- which(rownames(mat) == gene)
+      sums <- Matrix::rowSums(mat[idx, , drop = FALSE])
+      idx[which.max(sums)]
+    }, integer(1))
     mat <- mat[sort(c(gene_unique_index, gene_dupl_index)), ]
   }
   return(mat)
@@ -59,7 +58,7 @@ sweep_sparse <- function(m, margin, stats, fun) {
   if (margin == 1) {
     idx <- m@i + 1
   } else {
-    if (class(m)[1] == "dgCMatrix") {
+    if (inherits(m, "dgCMatrix")) {
       idx <- rep(1:m@Dim[2], diff(m@p))
     } else {
       idx <- m@j + 1
@@ -72,7 +71,7 @@ sweep_sparse <- function(m, margin, stats, fun) {
 #' @keywords internal
 .secact_preprocess <- function(Y, SigMat, is.group.sig, is.group.cor, rng_method) {
   if (is.matrix(SigMat) || is.data.frame(SigMat)) {
-    X <- as.data.frame(SigMat)
+    X <- SigMat
   } else if (SigMat == "SecAct") {
     Xfile <- system.file("extdata", "SecAct.tsv.gz", package = "RidgeR")
     X <- read.table(Xfile, sep = "\t", check.names = FALSE)
@@ -101,15 +100,13 @@ sweep_sparse <- function(m, margin, stats, fun) {
 #' @keywords internal
 .secact_postprocess <- function(result, is.group.sig) {
   if (is.group.sig) {
-    result$beta   <- expand_rows(result$beta)
-    result$se     <- expand_rows(result$se)
-    result$zscore <- expand_rows(result$zscore)
-    result$pvalue <- expand_rows(result$pvalue)
+    for (nm in c("beta", "se", "zscore", "pvalue")) {
+      result[[nm]] <- expand_rows(result[[nm]])
+    }
     ord <- sort(rownames(result$beta))
-    result$beta   <- result$beta[ord, , drop = FALSE]
-    result$se     <- result$se[ord, , drop = FALSE]
-    result$zscore <- result$zscore[ord, , drop = FALSE]
-    result$pvalue <- result$pvalue[ord, , drop = FALSE]
+    for (nm in c("beta", "se", "zscore", "pvalue")) {
+      result[[nm]] <- result[[nm]][ord, , drop = FALSE]
+    }
   }
   result
 }
@@ -193,26 +190,18 @@ SecAct.inference <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand = 1000,
   }
 
   # Dispatch
-  switch(method,
-    Tcol.mt = SecAct.inference.Tcol.mt(Y, SigMat = SigMat, lambda = lambda, nrand = nrand,
-                                        ncores = ncores, rng_method = rng_method,
-                                        is.group.sig = is.group.sig, is.group.cor = is.group.cor),
-    Tcol.st = SecAct.inference.Tcol.st(Y, SigMat = SigMat, lambda = lambda, nrand = nrand,
-                                        rng_method = rng_method,
-                                        is.group.sig = is.group.sig, is.group.cor = is.group.cor),
-    Yrow.mt = SecAct.inference.Yrow.mt(Y, SigMat = SigMat, lambda = lambda, nrand = nrand,
-                                        ncores = ncores, rng_method = rng_method,
-                                        is.group.sig = is.group.sig, is.group.cor = is.group.cor),
-    Yrow.st = SecAct.inference.Yrow.st(Y, SigMat = SigMat, lambda = lambda, nrand = nrand,
-                                        rng_method = rng_method,
-                                        is.group.sig = is.group.sig, is.group.cor = is.group.cor),
-    naive   = SecAct.inference.naive(Y, SigMat = SigMat, lambda = lambda, nrand = nrand,
-                                      rng_method = rng_method,
-                                      is.group.sig = is.group.sig, is.group.cor = is.group.cor),
-    gsl.old = SecAct.inference.gsl.old(Y, SigMat = SigMat, lambda = lambda, nrand = nrand,
-                                        rng_method = rng_method,
-                                        is.group.sig = is.group.sig, is.group.cor = is.group.cor)
+  fn <- switch(method,
+    Tcol.mt = SecAct.inference.Tcol.mt,
+    Tcol.st = SecAct.inference.Tcol.st,
+    Yrow.mt = SecAct.inference.Yrow.mt,
+    Yrow.st = SecAct.inference.Yrow.st,
+    naive   = SecAct.inference.naive,
+    gsl.old = SecAct.inference.gsl.old
   )
+  args <- list(Y = Y, SigMat = SigMat, lambda = lambda, nrand = nrand,
+               rng_method = rng_method, is.group.sig = is.group.sig, is.group.cor = is.group.cor)
+  if (method %in% c("Tcol.mt", "Yrow.mt")) args$ncores <- ncores
+  do.call(fn, args)
 }
 
 
@@ -234,57 +223,22 @@ SecAct.inference <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand = 1000,
 SecAct.inference.gsl.old <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand = 1000,
                                      rng_method = "srand", is.group.sig = TRUE, is.group.cor = 0.9)
 {
-  if (is.matrix(SigMat) || is.data.frame(SigMat)) {
-    X <- as.data.frame(SigMat)
-  } else if (SigMat == "SecAct") {
-    Xfile <- system.file("extdata", "SecAct.tsv.gz", package = "RidgeR")
-    X <- read.table(Xfile, sep = "\t", check.names = FALSE)
-  } else {
-    X <- read.table(SigMat, sep = "\t", check.names = FALSE)
-  }
+  pre <- .secact_preprocess(Y, SigMat, is.group.sig, is.group.cor, rng_method)
 
-  if (is.group.sig) {
-    X <- group_signatures(X, cor_threshold = is.group.cor)
-  }
-
-  rng_int <- match.arg(rng_method, c("srand", "gsl"))
-  rng_int <- ifelse(rng_int == "gsl", 1L, 0L)
-
-  olp <- intersect(row.names(Y), row.names(X))
-  X <- as.matrix(X[olp, , drop = FALSE])
-  Y <- as.matrix(Y[olp, , drop = FALSE])
-  X <- scale(X); Y <- scale(Y)
-  X[is.na(X)] <- 0; Y[is.na(Y)] <- 0
-
-  n <- length(olp); p <- ncol(X); m <- ncol(Y)
+  n <- nrow(pre$X); p <- ncol(pre$X); m <- ncol(pre$Y)
 
   res <- .C("ridgeReg",
-            X = as.double(t(X)),
-            Y = as.double(t(Y)),
+            X = as.double(t(pre$X)),
+            Y = as.double(t(pre$Y)),
             as.integer(n), as.integer(p), as.integer(m),
             as.double(lambda), as.double(nrand),
             beta = double(p * m), se = double(p * m),
             zscore = double(p * m), pvalue = double(p * m),
-            rng_method = as.integer(rng_int)
+            rng_method = as.integer(pre$rng_int)
   )
 
-  formatter <- function(v) matrix(v, byrow = TRUE, ncol = m, dimnames = list(colnames(X), colnames(Y)))
-  result <- list(beta = formatter(res$beta), se = formatter(res$se),
-                 zscore = formatter(res$zscore), pvalue = formatter(res$pvalue))
-
-  if (is.group.sig) {
-    result$beta   <- expand_rows(result$beta)
-    result$se     <- expand_rows(result$se)
-    result$zscore <- expand_rows(result$zscore)
-    result$pvalue <- expand_rows(result$pvalue)
-    ord <- sort(rownames(result$beta))
-    result$beta   <- result$beta[ord, , drop = FALSE]
-    result$se     <- result$se[ord, , drop = FALSE]
-    result$zscore <- result$zscore[ord, , drop = FALSE]
-    result$pvalue <- result$pvalue[ord, , drop = FALSE]
-  }
-
-  result
+  result <- .secact_format_call(res, pre$X, pre$Y)
+  .secact_postprocess(result, is.group.sig)
 }
 
 #' @title Secreted protein activity inference (Optimized dispatcher)
@@ -305,23 +259,23 @@ SecAct.inference.gsl.new <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand
                                      is.group.sig = TRUE, is.group.cor = 0.9)
 {
   method <- match.arg(method, c("Tcol.mt", "Tcol.st", "Yrow.mt", "Yrow.st"))
-
-  switch(method,
-    Tcol.mt = SecAct.inference.Tcol.mt(Y, SigMat = SigMat, lambda = lambda, nrand = nrand,
-                                        ncores = ncores, rng_method = rng_method,
-                                        is.group.sig = is.group.sig, is.group.cor = is.group.cor),
-    Tcol.st = SecAct.inference.Tcol.st(Y, SigMat = SigMat, lambda = lambda, nrand = nrand,
-                                        rng_method = rng_method,
-                                        is.group.sig = is.group.sig, is.group.cor = is.group.cor),
-    Yrow.mt = SecAct.inference.Yrow.mt(Y, SigMat = SigMat, lambda = lambda, nrand = nrand,
-                                        ncores = ncores, rng_method = rng_method,
-                                        is.group.sig = is.group.sig, is.group.cor = is.group.cor),
-    Yrow.st = SecAct.inference.Yrow.st(Y, SigMat = SigMat, lambda = lambda, nrand = nrand,
-                                        rng_method = rng_method,
-                                        is.group.sig = is.group.sig, is.group.cor = is.group.cor)
-  )
+  SecAct.inference(Y, SigMat = SigMat, lambda = lambda, nrand = nrand,
+                   ncores = ncores, rng_method = rng_method, method = method,
+                   is.group.sig = is.group.sig, is.group.cor = is.group.cor)
 }
 
+
+#' @keywords internal
+.secact_call_backend <- function(Y, SigMat, lambda, nrand, ncores, rng_method,
+                                  is.group.sig, is.group.cor, c_symbol) {
+  pre <- .secact_preprocess(Y, SigMat, is.group.sig, is.group.cor, rng_method)
+  if (is.null(ncores)) ncores <- parallel::detectCores(logical = FALSE)
+  res <- .Call(c_symbol, pre$X, pre$Y,
+               as.numeric(lambda), as.integer(nrand),
+               as.integer(ncores), as.integer(pre$rng_int))
+  result <- .secact_format_call(res, pre$X, pre$Y)
+  .secact_postprocess(result, is.group.sig)
+}
 
 # =========================================================
 # 5 Optimized Variants
@@ -339,17 +293,9 @@ SecAct.inference.gsl.new <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand
 SecAct.inference.Yrow.st <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand = 1000,
                                      rng_method = "srand", is.group.sig = TRUE, is.group.cor = 0.9)
 {
-  pre <- .secact_preprocess(Y, SigMat, is.group.sig, is.group.cor, rng_method)
-
-  res <- .Call("ridgeRegFast_interface",
-               pre$X, pre$Y,
-               as.numeric(lambda),
-               as.integer(nrand),
-               1L,
-               as.integer(pre$rng_int))
-
-  result <- .secact_format_call(res, pre$X, pre$Y)
-  .secact_postprocess(result, is.group.sig)
+  SecAct.inference.Yrow.mt(Y, SigMat = SigMat, lambda = lambda, nrand = nrand,
+                           ncores = 1L, rng_method = rng_method,
+                           is.group.sig = is.group.sig, is.group.cor = is.group.cor)
 }
 
 #' @title Y-row permutation, multi-threaded (.Call)
@@ -366,19 +312,8 @@ SecAct.inference.Yrow.mt <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand
                                      ncores = NULL, rng_method = "srand",
                                      is.group.sig = TRUE, is.group.cor = 0.9)
 {
-  pre <- .secact_preprocess(Y, SigMat, is.group.sig, is.group.cor, rng_method)
-
-  if (is.null(ncores)) ncores <- parallel::detectCores(logical = FALSE)
-
-  res <- .Call("ridgeRegFast_interface",
-               pre$X, pre$Y,
-               as.numeric(lambda),
-               as.integer(nrand),
-               as.integer(ncores),
-               as.integer(pre$rng_int))
-
-  result <- .secact_format_call(res, pre$X, pre$Y)
-  .secact_postprocess(result, is.group.sig)
+  .secact_call_backend(Y, SigMat, lambda, nrand, ncores, rng_method,
+                       is.group.sig, is.group.cor, "ridgeRegFast_interface")
 }
 
 #' @title T-column permutation, single-threaded (.Call)
@@ -393,17 +328,9 @@ SecAct.inference.Yrow.mt <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand
 SecAct.inference.Tcol.st <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand = 1000,
                                      rng_method = "srand", is.group.sig = TRUE, is.group.cor = 0.9)
 {
-  pre <- .secact_preprocess(Y, SigMat, is.group.sig, is.group.cor, rng_method)
-
-  res <- .Call("ridgeRegFastTcol_interface",
-               pre$X, pre$Y,
-               as.numeric(lambda),
-               as.integer(nrand),
-               1L,
-               as.integer(pre$rng_int))
-
-  result <- .secact_format_call(res, pre$X, pre$Y)
-  .secact_postprocess(result, is.group.sig)
+  SecAct.inference.Tcol.mt(Y, SigMat = SigMat, lambda = lambda, nrand = nrand,
+                           ncores = 1L, rng_method = rng_method,
+                           is.group.sig = is.group.sig, is.group.cor = is.group.cor)
 }
 
 #' @title T-column permutation, multi-threaded (.Call)
@@ -420,19 +347,8 @@ SecAct.inference.Tcol.mt <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand
                                      ncores = NULL, rng_method = "srand",
                                      is.group.sig = TRUE, is.group.cor = 0.9)
 {
-  pre <- .secact_preprocess(Y, SigMat, is.group.sig, is.group.cor, rng_method)
-
-  if (is.null(ncores)) ncores <- parallel::detectCores(logical = FALSE)
-
-  res <- .Call("ridgeRegFastTcol_interface",
-               pre$X, pre$Y,
-               as.numeric(lambda),
-               as.integer(nrand),
-               as.integer(ncores),
-               as.integer(pre$rng_int))
-
-  result <- .secact_format_call(res, pre$X, pre$Y)
-  .secact_postprocess(result, is.group.sig)
+  .secact_call_backend(Y, SigMat, lambda, nrand, ncores, rng_method,
+                       is.group.sig, is.group.cor, "ridgeRegFastTcol_interface")
 }
 
 #' @title Pure R naive implementation with C-generated permutation table
@@ -490,12 +406,8 @@ SecAct.inference.naive <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand =
   zscore <- ifelse(se > 1e-12, (beta - mean_rand) / se, 0.0)
   pvalue <- (pvalue_counts + 1.0) / (nrand + 1.0)
 
-  rownames(beta)   <- colnames(X); colnames(beta)   <- colnames(Y)
-  rownames(se)     <- colnames(X); colnames(se)     <- colnames(Y)
-  rownames(zscore) <- colnames(X); colnames(zscore) <- colnames(Y)
-  rownames(pvalue) <- colnames(X); colnames(pvalue) <- colnames(Y)
-
   result <- list(beta = beta, se = se, zscore = zscore, pvalue = pvalue)
+  for (nm in names(result)) dimnames(result[[nm]]) <- list(colnames(X), colnames(Y))
   .secact_postprocess(result, is.group.sig)
 }
 
@@ -548,10 +460,10 @@ SecAct.activity.inference <- function(
     method = "auto"
 )
 {
-  if (class(inputProfile)[1] == "SpaCET") {
+  if (inherits(inputProfile, "SpaCET")) {
     stop("Please use 'SecAct.activity.inference.ST'.")
   }
-  if (class(inputProfile)[1] == "Seurat") {
+  if (inherits(inputProfile, "Seurat")) {
     stop("Please use 'SecAct.activity.inference.scRNAseq'.")
   }
 
@@ -569,7 +481,7 @@ SecAct.activity.inference <- function(
       } else {
         Y <- inputProfile - rowMeans(inputProfile_control)
       }
-      if (is.singleSampleLevel == FALSE) {
+      if (!is.singleSampleLevel) {
         Y <- matrix(rowMeans(Y), ncol = 1, dimnames = list(rownames(Y), "Change"))
       }
     }
@@ -593,7 +505,7 @@ SecAct.activity.inference <- function(
   }
 
   # --- Filter signatures ---
-  if (is.filter.sig == TRUE) {
+  if (is.filter.sig) {
     X <- X[, colnames(X) %in% row.names(Y)]
   }
 
@@ -611,6 +523,19 @@ SecAct.activity.inference <- function(
   )
 }
 
+
+#' @keywords internal
+.preprocess_spacet_counts <- function(spacet_obj, scale.factor) {
+  expr <- spacet_obj@input$counts
+  expr <- expr[Matrix::rowSums(expr) > 0, ]
+  rownames(expr) <- transferSymbol(rownames(expr))
+  expr <- rm_duplicates(expr)
+  stats <- Matrix::colSums(expr)
+  expr <- sweep_sparse(expr, 2, stats, "/")
+  expr@x <- expr@x * scale.factor
+  expr@x <- log2(expr@x + 1)
+  expr
+}
 
 #' @title Spot activity inference from spatial data
 #' @description Calculate secreted protein signaling activity of spots from spatial transcriptomics data.
@@ -645,42 +570,16 @@ SecAct.activity.inference.ST <- function(
     method = "auto"
 )
 {
-  if (!class(inputProfile)[1] == "SpaCET") {
+  if (!inherits(inputProfile, "SpaCET")) {
     stop("Please input a SpaCET object.")
   }
 
-  # extract count matrix
-  expr <- inputProfile@input$counts
-  expr <- expr[Matrix::rowSums(expr) > 0, ]
-  rownames(expr) <- transferSymbol(rownames(expr))
-  expr <- rm_duplicates(expr)
-
-  # normalize to TPM
-  stats <- Matrix::colSums(expr)
-  expr <- sweep_sparse(expr, 2, stats, "/")
-  expr@x <- expr@x * scale.factor
-
-  # transform to log space
-  expr@x <- log2(expr@x + 1)
+  expr <- .preprocess_spacet_counts(inputProfile, scale.factor)
 
   if (is.null(inputProfile_control)) {
-    # normalized with the control samples
     expr.diff <- expr - Matrix::rowMeans(expr)
   } else {
-    # extract count matrix
-    expr_control <- inputProfile_control@input$counts
-    expr_control <- expr_control[Matrix::rowSums(expr_control) > 0, ]
-    rownames(expr_control) <- transferSymbol(rownames(expr_control))
-    expr_control <- rm_duplicates(expr_control)
-
-    # normalize to TPM
-    stats <- Matrix::colSums(expr_control)
-    expr_control <- sweep_sparse(expr_control, 2, stats, "/")
-    expr_control@x <- expr_control@x * scale.factor
-
-    # transform to log space
-    expr_control@x <- log2(expr_control@x + 1)
-
+    expr_control <- .preprocess_spacet_counts(inputProfile_control, scale.factor)
     olp <- intersect(rownames(expr), rownames(expr_control))
     expr.diff <- expr[olp, ] - Matrix::rowMeans(expr_control[olp, ])
   }
@@ -738,11 +637,11 @@ SecAct.activity.inference.scRNAseq <- function(
     method = "auto"
 )
 {
-  if (!class(inputProfile)[1] == "Seurat") {
+  if (!inherits(inputProfile, "Seurat")) {
     stop("Please input a Seurat object.")
   }
 
-  if (class(inputProfile@assays$RNA) == "Assay5") {
+  if (inherits(inputProfile@assays$RNA, "Assay5")) {
     counts <- inputProfile@assays$RNA@layers$counts
     colnames(counts) <- rownames(inputProfile@assays$RNA@cells)
     rownames(counts) <- rownames(inputProfile@assays$RNA@features)
@@ -753,17 +652,19 @@ SecAct.activity.inference.scRNAseq <- function(
   rownames(counts) <- transferSymbol(rownames(counts))
   counts <- rm_duplicates(counts)
 
-  if (is.singleCellLevel == FALSE) {
+  if (!is.singleCellLevel) {
     cellType_vec <- inputProfile@meta.data[, cellType_meta]
 
     # generate pseudo bulk
-    expr <- data.frame()
-    for (cellType in sort(unique(cellType_vec))) {
-      expr[rownames(counts), cellType] <- Matrix::rowSums(counts[, cellType_vec == cellType, drop = FALSE])
+    cell_types <- sort(unique(cellType_vec))
+    expr <- matrix(NA_real_, nrow = nrow(counts), ncol = length(cell_types),
+                   dimnames = list(rownames(counts), cell_types))
+    for (i in seq_along(cell_types)) {
+      expr[, i] <- Matrix::rowSums(counts[, cellType_vec == cell_types[i], drop = FALSE])
     }
 
     # normalize to TPM
-    expr <- sweep(expr, 2, Matrix::colSums(expr), "/") * 1e6
+    expr <- sweep(expr, 2, colSums(expr), "/") * 1e6
   } else {
     expr <- sweep(counts, 2, Matrix::colSums(counts), "/") * 1e5
   }

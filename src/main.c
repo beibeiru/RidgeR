@@ -73,21 +73,21 @@ void gsl_matrix_partial_free(gsl_matrix *x)
 /* Fisher-Yates shuffle — C stdlib rand() (platform-dependent). */
 void shuffle_srand(int array[], const int n)
 {
-  int i, j; double t;
+  int i, j, t;
   for (i = 0; i < n-1; i++) {
     j = i + rand() / (RAND_MAX / (n - i) + 1);
-    t = array[j]; array[j] = array[i]; array[i] = (int)t;
+    t = array[j]; array[j] = array[i]; array[i] = t;
   }
 }
 
 /* Fisher-Yates shuffle — GSL MT19937 (cross-platform, matches SecActPy). */
 void shuffle_gsl(gsl_rng *rng, int array[], const int n)
 {
-  int i, j; double t;
+  int i, j, t;
   for (i = 0; i < n-1; i++) {
     unsigned long r = gsl_rng_get(rng);
     j = i + (int)(r / (GSL_MT19937_MAX / (unsigned long)(n - i) + 1));
-    t = array[j]; array[j] = array[i]; array[i] = (int)t;
+    t = array[j]; array[j] = array[i]; array[i] = t;
   }
 }
 
@@ -119,6 +119,54 @@ static int *build_perm_table(int nrand, size_t n, int rng_method)
   return table;
 }
 
+
+/* Finalize permutation statistics: convert accumulated sums into
+   p-value, SE, and z-score. Shared by both Yrow and Tcol cores. */
+static void finalize_stats(
+  double *beta_vec, double *se_vec, double *zscore_vec, double *pvalue_vec,
+  R_xlen_t total, int nrand)
+{
+  double inv_nrand = 1.0 / nrand;
+  for (R_xlen_t i = 0; i < total; i++) {
+    pvalue_vec[i]  = (pvalue_vec[i] + 1.0) / (nrand + 1.0);
+    double mean_r  = zscore_vec[i] * inv_nrand;
+    double var_r   = (se_vec[i] * inv_nrand) - mean_r * mean_r;
+    double se_r    = sqrt(var_r > 0 ? var_r : 0);
+    se_vec[i]      = se_r;
+    zscore_vec[i]  = (se_r > 1e-12) ? (beta_vec[i] - mean_r) / se_r : 0.0;
+  }
+}
+
+/* Accumulate permutation statistics (serial, no atomics).
+   Used by both Yrow and Tcol single-threaded paths. */
+static inline void accumulate_stats_serial(
+  double *beta_vec, double *se_vec, double *zscore_vec, double *pvalue_vec,
+  gsl_matrix *beta_rand, size_t p, size_t m)
+{
+  for (size_t r = 0; r < p; r++) {
+    for (size_t s = 0; s < m; s++) {
+      R_xlen_t idx   = (R_xlen_t)r * m + s;
+      double   b_rnd = beta_rand->data[r * beta_rand->tda + s];
+      double   b_obs = beta_vec[idx];
+      if (fabs(b_rnd) >= fabs(b_obs)) pvalue_vec[idx] += 1.0;
+      zscore_vec[idx] += b_rnd;
+      se_vec[idx]     += b_rnd * b_rnd;
+    }
+  }
+}
+
+/* Compute projection matrix: T = (X'X + lambda*I)^-1 * X'.
+   Xt is the p-by-n transposed design matrix (GSL row-major).
+   I_mat (p x p) and T (p x n) must be pre-allocated. */
+static void compute_projection(gsl_matrix *Xt, gsl_matrix *I_mat, gsl_matrix *T,
+                                size_t p, double lambda)
+{
+  gsl_matrix_set_identity(I_mat);
+  gsl_blas_dsyrk(CblasLower, CblasNoTrans, 1.0, Xt, lambda, I_mat);
+  CHOLESKY_DECOMP(I_mat);
+  gsl_linalg_cholesky_invert(I_mat);
+  gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, I_mat, Xt, 0.0, T);
+}
 
 /* =========================================================
    LEGACY FUNCTION — ridgeReg (.C interface, 32-bit)
@@ -260,12 +308,7 @@ void ridgeRegFast_core(
   gsl_matrix *I_mat = gsl_matrix_alloc(p, p);
   gsl_matrix *T     = gsl_matrix_alloc(p, n);
 
-  /* Projection: T = (X'X + lambda*I)^-1 * X' */
-  gsl_matrix_set_identity(I_mat);
-  gsl_blas_dsyrk(CblasLower, CblasNoTrans, 1.0, Xt, lambda, I_mat);
-  CHOLESKY_DECOMP(I_mat);
-  gsl_linalg_cholesky_invert(I_mat);
-  gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, I_mat, Xt, 0.0, T);
+  compute_projection(Xt, I_mat, T, p, lambda);
 
   /* Observed beta = T * Y_real = T * Yt' */
   gsl_blas_dgemm(CblasNoTrans, CblasTrans, 1.0, T, Yt, 0.0, beta);
@@ -313,17 +356,8 @@ void ridgeRegFast_core(
       /* One large dgemm per permutation — optimal BLAS efficiency */
       gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, T, Y_rand, 0.0, beta_rand);
 
-      /* Accumulate statistics — no atomics needed (serial) */
-      for (size_t r = 0; r < p; r++) {
-        for (size_t s = 0; s < m; s++) {
-          R_xlen_t idx   = (R_xlen_t)r * m + s;
-          double   b_rnd = gsl_matrix_get(beta_rand, r, s);
-          double   b_obs = beta_vec[idx];
-          if (fabs(b_rnd) >= fabs(b_obs)) pvalue_vec[idx] += 1.0;
-          zscore_vec[idx] += b_rnd;
-          se_vec[idx]     += b_rnd * b_rnd;
-        }
-      }
+      accumulate_stats_serial(beta_vec, se_vec, zscore_vec, pvalue_vec,
+                              beta_rand, p, m);
     }
 
     gsl_matrix_free(Y_real);
@@ -391,17 +425,7 @@ void ridgeRegFast_core(
   }
 
   free(perm_table);
-
-  /* Finalise statistics */
-  double inv_nrand = 1.0 / nrand;
-  for (R_xlen_t i = 0; i < total; i++) {
-    pvalue_vec[i]  = (pvalue_vec[i] + 1.0) / (nrand + 1.0);
-    double mean_r  = zscore_vec[i] * inv_nrand;
-    double var_r   = (se_vec[i] * inv_nrand) - mean_r * mean_r;
-    double se_r    = sqrt(var_r > 0 ? var_r : 0);
-    se_vec[i]      = se_r;
-    zscore_vec[i]  = (se_r > 1e-12) ? (beta_vec[i] - mean_r) / se_r : 0.0;
-  }
+  finalize_stats(beta_vec, se_vec, zscore_vec, pvalue_vec, total, nrand);
 
   gsl_matrix_free(I_mat); gsl_matrix_free(T);
   gsl_matrix_partial_free(Xt); gsl_matrix_partial_free(Yt);
@@ -442,12 +466,7 @@ void ridgeRegFastTcol_core(
   gsl_matrix *I_mat = gsl_matrix_alloc(p, p);
   gsl_matrix *T     = gsl_matrix_alloc(p, n);
 
-  /* Projection: T = (X'X + lambda*I)^-1 * X' */
-  gsl_matrix_set_identity(I_mat);
-  gsl_blas_dsyrk(CblasLower, CblasNoTrans, 1.0, Xt, lambda, I_mat);
-  CHOLESKY_DECOMP(I_mat);
-  gsl_linalg_cholesky_invert(I_mat);
-  gsl_blas_dgemm(CblasNoTrans, CblasNoTrans, 1.0, I_mat, Xt, 0.0, T);
+  compute_projection(Xt, I_mat, T, p, lambda);
 
   /* Observed beta = T * Yt' */
   gsl_blas_dgemm(CblasNoTrans, CblasTrans, 1.0, T, Yt, 0.0, beta);
@@ -504,17 +523,8 @@ void ridgeRegFastTcol_core(
       /* One large dgemm against the full Y — optimal shape */
       gsl_blas_dgemm(CblasNoTrans, CblasTrans, 1.0, T_perm, Yt, 0.0, beta_rand);
 
-      /* Accumulate — no atomics needed (serial) */
-      for (size_t r = 0; r < p; r++) {
-        for (size_t s = 0; s < m; s++) {
-          R_xlen_t idx   = (R_xlen_t)r * m + s;
-          double   b_rnd = gsl_matrix_get(beta_rand, r, s);
-          double   b_obs = beta_vec[idx];
-          if (fabs(b_rnd) >= fabs(b_obs)) pvalue_vec[idx] += 1.0;
-          zscore_vec[idx] += b_rnd;
-          se_vec[idx]     += b_rnd * b_rnd;
-        }
-      }
+      accumulate_stats_serial(beta_vec, se_vec, zscore_vec, pvalue_vec,
+                              beta_rand, p, m);
     }
 
     gsl_matrix_free(T_perm);
@@ -578,17 +588,7 @@ void ridgeRegFastTcol_core(
   }
 
   free(inv_perm_table);
-
-  /* Finalise statistics */
-  double inv_nrand = 1.0 / nrand;
-  for (R_xlen_t i = 0; i < total; i++) {
-    pvalue_vec[i]  = (pvalue_vec[i] + 1.0) / (nrand + 1.0);
-    double mean_r  = zscore_vec[i] * inv_nrand;
-    double var_r   = (se_vec[i] * inv_nrand) - mean_r * mean_r;
-    double se_r    = sqrt(var_r > 0 ? var_r : 0);
-    se_vec[i]      = se_r;
-    zscore_vec[i]  = (se_r > 1e-12) ? (beta_vec[i] - mean_r) / se_r : 0.0;
-  }
+  finalize_stats(beta_vec, se_vec, zscore_vec, pvalue_vec, total, nrand);
 
   gsl_matrix_free(I_mat); gsl_matrix_free(T);
   gsl_matrix_partial_free(Xt); gsl_matrix_partial_free(Yt);
@@ -600,8 +600,13 @@ void ridgeRegFastTcol_core(
    .Call INTERFACES
    ========================================================= */
 
-SEXP ridgeRegFast_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp,
-                             SEXP nrand_sexp, SEXP ncores_sexp, SEXP rng_method_sexp)
+typedef void (*ridge_core_fn)(double*, double*, size_t, size_t, size_t,
+                               double, int, double*, double*, double*, double*,
+                               int, int);
+
+static SEXP ridge_interface_common(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp,
+                                    SEXP nrand_sexp, SEXP ncores_sexp,
+                                    SEXP rng_method_sexp, ridge_core_fn core_fn)
 {
   SEXP x_dim = getAttrib(X_sexp, R_DimSymbol);
   size_t n = (size_t)INTEGER(x_dim)[0];
@@ -615,10 +620,10 @@ SEXP ridgeRegFast_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp,
   SEXP zscore_s = PROTECT(allocVector(REALSXP, total));
   SEXP pvalue_s = PROTECT(allocVector(REALSXP, total));
 
-  ridgeRegFast_core(REAL(X_sexp), REAL(Y_sexp), n, p, m,
-                    asReal(lambda_sexp), asInteger(nrand_sexp),
-                    REAL(beta_s), REAL(se_s), REAL(zscore_s), REAL(pvalue_s),
-                    asInteger(ncores_sexp), asInteger(rng_method_sexp));
+  core_fn(REAL(X_sexp), REAL(Y_sexp), n, p, m,
+          asReal(lambda_sexp), asInteger(nrand_sexp),
+          REAL(beta_s), REAL(se_s), REAL(zscore_s), REAL(pvalue_s),
+          asInteger(ncores_sexp), asInteger(rng_method_sexp));
 
   SEXP res   = PROTECT(allocVector(VECSXP, 4));
   SEXP names = PROTECT(allocVector(STRSXP, 4));
@@ -631,35 +636,20 @@ SEXP ridgeRegFast_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp,
   return res;
 }
 
+SEXP ridgeRegFast_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp,
+                             SEXP nrand_sexp, SEXP ncores_sexp, SEXP rng_method_sexp)
+{
+  return ridge_interface_common(X_sexp, Y_sexp, lambda_sexp,
+                                 nrand_sexp, ncores_sexp, rng_method_sexp,
+                                 ridgeRegFast_core);
+}
+
 SEXP ridgeRegFastTcol_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp,
                                  SEXP nrand_sexp, SEXP ncores_sexp, SEXP rng_method_sexp)
 {
-  SEXP x_dim = getAttrib(X_sexp, R_DimSymbol);
-  size_t n = (size_t)INTEGER(x_dim)[0];
-  size_t p = (size_t)INTEGER(x_dim)[1];
-  SEXP y_dim = getAttrib(Y_sexp, R_DimSymbol);
-  size_t m = (size_t)INTEGER(y_dim)[1];
-  R_xlen_t total = (R_xlen_t)p * (R_xlen_t)m;
-
-  SEXP beta_s   = PROTECT(allocVector(REALSXP, total));
-  SEXP se_s     = PROTECT(allocVector(REALSXP, total));
-  SEXP zscore_s = PROTECT(allocVector(REALSXP, total));
-  SEXP pvalue_s = PROTECT(allocVector(REALSXP, total));
-
-  ridgeRegFastTcol_core(REAL(X_sexp), REAL(Y_sexp), n, p, m,
-                        asReal(lambda_sexp), asInteger(nrand_sexp),
-                        REAL(beta_s), REAL(se_s), REAL(zscore_s), REAL(pvalue_s),
-                        asInteger(ncores_sexp), asInteger(rng_method_sexp));
-
-  SEXP res   = PROTECT(allocVector(VECSXP, 4));
-  SEXP names = PROTECT(allocVector(STRSXP, 4));
-  SET_VECTOR_ELT(res, 0, beta_s);   SET_STRING_ELT(names, 0, mkChar("beta"));
-  SET_VECTOR_ELT(res, 1, se_s);     SET_STRING_ELT(names, 1, mkChar("se"));
-  SET_VECTOR_ELT(res, 2, zscore_s); SET_STRING_ELT(names, 2, mkChar("zscore"));
-  SET_VECTOR_ELT(res, 3, pvalue_s); SET_STRING_ELT(names, 3, mkChar("pvalue"));
-  setAttrib(res, R_NamesSymbol, names);
-  UNPROTECT(6);
-  return res;
+  return ridge_interface_common(X_sexp, Y_sexp, lambda_sexp,
+                                 nrand_sexp, ncores_sexp, rng_method_sexp,
+                                 ridgeRegFastTcol_core);
 }
 
 
