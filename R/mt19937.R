@@ -62,25 +62,35 @@
   UPPER <- 2147483648  # 0x80000000
   LOWER <- 2147483647  # 0x7FFFFFFF
   MAGIC <- 2567483615  # 0x9908b0df
-  mt_old <- mt  # snapshot for loop 1 reads
+  mt_old <- mt
 
-  # Loop 1 (vectorized): kk = 1..227 — all reads from old state
+  # Pre-compute y for kk = 1..N-1 (all use original state:
+  # within each loop, mt[kk] and mt[kk+1] are never previously
+  # overwritten — writes go to mt[kk], reads are mt[kk] and mt[kk+1],
+  # and kk advances sequentially)
+  y <- .or32(.and32(mt_old[1:(N - 1L)], UPPER), .and32(mt_old[2:N], LOWER))
+  mag <- ifelse(y %% 2 == 1, MAGIC, 0)
+  sy <- .xor32(.shr32(y, 1), mag)
+
+  # Loop 1 (vectorized): kk = 1..227
+  # XOR targets: mt_old[kk+M] (398..624) — all original
   idx1 <- 1L:(N - M)
-  y1 <- .or32(.and32(mt_old[idx1], UPPER), .and32(mt_old[idx1 + 1L], LOWER))
-  mag1 <- ifelse(y1 %% 2 == 1, MAGIC, 0)
-  mt[idx1] <- .xor32(mt_old[idx1 + M], .xor32(.shr32(y1, 1), mag1))
+  mt[idx1] <- .xor32(mt_old[idx1 + M], sy[idx1])
 
-  # Loop 2 (scalar): kk = 228..623 — reads loop-1-updated values
-  for (kk in (N - M + 1L):(N - 1L)) {
-    y <- .or32(.and32(mt[kk], UPPER), .and32(mt[kk + 1L], LOWER))
-    mag <- if (y %% 2 == 1) MAGIC else 0
-    mt[kk] <- .xor32(mt[kk + M - N], .xor32(.shr32(y, 1), mag))
-  }
+  # Loop 2a (vectorized): kk = 228..454
+  # XOR targets: mt[kk+M-N] = mt[1..227] — all from loop 1
+  idx2a <- (N - M + 1L):(2L * (N - M))
+  mt[idx2a] <- .xor32(mt[idx2a + M - N], sy[idx2a])
 
-  # Final: kk = N (wrap)
-  y <- .or32(.and32(mt[N], UPPER), .and32(mt[1L], LOWER))
-  mag <- if (y %% 2 == 1) MAGIC else 0
-  mt[N] <- .xor32(mt[M], .xor32(.shr32(y, 1), mag))
+  # Loop 2b (vectorized): kk = 455..623
+  # XOR targets: mt[kk+M-N] = mt[228..396] — all from loop 2a
+  idx2b <- (2L * (N - M) + 1L):(N - 1L)
+  mt[idx2b] <- .xor32(mt[idx2b + M - N], sy[idx2b])
+
+  # Final: kk = N — uses UPDATED mt[1] (from loop 1), not mt_old[1]
+  yN <- .or32(.and32(mt_old[N], UPPER), .and32(mt[1L], LOWER))
+  magN <- if (yN %% 2 == 1) MAGIC else 0
+  mt[N] <- .xor32(mt[M], .xor32(.shr32(yN, 1), magN))
   mt
 }
 
@@ -134,17 +144,22 @@
   gen   <- .mt19937_generate(state, total)
   vals  <- gen$values
 
+  # Pre-compute swap divisors (same for every permutation)
+  ranges  <- n:2L                     # remaining elements per step
+  divisors <- MT_MAX %/% ranges + 1   # (n-1) values
+
+  # Pre-compute ALL swap targets at once (vectorized floor division)
+  vals_mat <- matrix(vals, nrow = n - 1L, ncol = nrand)
+  j_mat    <- floor(vals_mat / divisors) + (0:(n - 2L)) + 1L  # 1-indexed
+
   # Fisher-Yates shuffles with cumulative state
   arr   <- seq_len(n) - 1L  # 0-indexed: 0, 1, ..., n-1
   table <- matrix(0L, nrow = nrand, ncol = n)
-  vi    <- 1L  # index into pre-generated values
 
   for (perm in seq_len(nrand)) {
+    j_vec <- j_mat[, perm]
     for (i in seq_len(n - 1L)) {
-      range <- n - i + 1L  # remaining elements (0-indexed count)
-      j <- (i - 1L) + floor(vals[vi] / (MT_MAX %/% range + 1))
-      vi <- vi + 1L
-      j <- j + 1L  # to 1-indexed
+      j <- j_vec[i]
       tmp <- arr[j]; arr[j] <- arr[i]; arr[i] <- tmp
     }
     table[perm, ] <- arr  # cumulative: array NOT reset between permutations
