@@ -83,8 +83,9 @@ sweep_sparse <- function(m, margin, stats, fun) {
     X <- group_signatures(X, cor_threshold = is.group.cor)
   }
 
-  rng_int <- match.arg(rng_method, c("srand", "gsl"))
-  rng_int <- ifelse(rng_int == "gsl", 1L, 0L)
+  rng_method <- match.arg(rng_method, c("srand", "gsl", "gsl_r"))
+  # For C backends: "gsl_r" uses the same MT19937 algorithm as "gsl"
+  rng_int <- if (rng_method == "srand") 0L else 1L
 
   olp <- intersect(row.names(Y), row.names(X))
   if (length(olp) < 2) stop("The overlapped genes between your expression matrix and the signature matrix are too few!")
@@ -94,7 +95,7 @@ sweep_sparse <- function(m, margin, stats, fun) {
   X <- scale(X); X[is.na(X)] <- 0
   Y <- scale(Y); Y[is.na(Y)] <- 0
 
-  list(X = X, Y = Y, rng_int = rng_int)
+  list(X = X, Y = Y, rng_int = rng_int, rng_method = rng_method)
 }
 
 #' @keywords internal
@@ -150,8 +151,9 @@ sweep_sparse <- function(m, margin, stats, fun) {
 #' @param lambda Ridge regularization parameter (default: 5e+05).
 #' @param nrand Number of permutations (default: 1000).
 #' @param ncores Number of CPU cores for multi-threaded variants (\code{NULL} = auto-detect).
-#' @param rng_method RNG backend: \code{"srand"} (default, platform-dependent C stdlib)
-#'   or \code{"gsl"} (cross-platform GSL MT19937, matches SecActPy).
+#' @param rng_method RNG backend: \code{"srand"} (default, platform-dependent C stdlib),
+#'   \code{"gsl"} (cross-platform GSL MT19937, matches SecActPy), or
+#'   \code{"gsl_r"} (pure R MT19937, no GSL dependency, identical output to \code{"gsl"}).
 #' @param method Backend to use. One of \code{"auto"} (default), \code{"Tcol.mt"},
 #'   \code{"Tcol.st"}, \code{"Yrow.mt"}, \code{"Yrow.st"}, \code{"naive"}, or \code{"gsl.old"}.
 #'   \code{"auto"} selects the platform default.
@@ -216,7 +218,7 @@ SecAct.inference <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand = 1000,
 #' @param SigMat Secreted protein signature matrix.
 #' @param lambda Penalty factor.
 #' @param nrand Number of randomizations.
-#' @param rng_method RNG method: "srand" (default) or "gsl".
+#' @param rng_method RNG method: "srand" (default), "gsl", or "gsl_r".
 #' @param is.group.sig Logical; group correlated signatures before regression (default TRUE).
 #' @param is.group.cor Correlation threshold for grouping (default 0.9).
 #' @export
@@ -249,7 +251,7 @@ SecAct.inference.gsl.old <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand
 #' @param lambda Penalty factor.
 #' @param nrand Number of randomizations.
 #' @param ncores Number of cores (NULL = auto-detect; multi-threaded variants only).
-#' @param rng_method RNG method: "srand" (default) or "gsl".
+#' @param rng_method RNG method: "srand" (default), "gsl", or "gsl_r".
 #' @param method Variant: "Tcol.mt" (default), "Tcol.st", "Yrow.mt", or "Yrow.st".
 #' @param is.group.sig Logical; group correlated signatures before regression (default TRUE).
 #' @param is.group.cor Correlation threshold for grouping (default 0.9).
@@ -286,7 +288,7 @@ SecAct.inference.gsl.new <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand
 #' @param SigMat Signature matrix: "SecAct" (bundled) or path to file.
 #' @param lambda Ridge regularization parameter.
 #' @param nrand Number of permutations.
-#' @param rng_method RNG method: "srand" (default) or "gsl".
+#' @param rng_method RNG method: "srand" (default), "gsl", or "gsl_r".
 #' @param is.group.sig Group correlated signatures before regression.
 #' @param is.group.cor Correlation threshold for grouping.
 #' @export
@@ -304,7 +306,7 @@ SecAct.inference.Yrow.st <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand
 #' @param lambda Ridge regularization parameter.
 #' @param nrand Number of permutations.
 #' @param ncores Number of CPU cores (NULL = auto-detect).
-#' @param rng_method RNG method: "srand" (default) or "gsl".
+#' @param rng_method RNG method: "srand" (default), "gsl", or "gsl_r".
 #' @param is.group.sig Group correlated signatures before regression.
 #' @param is.group.cor Correlation threshold for grouping.
 #' @export
@@ -321,7 +323,7 @@ SecAct.inference.Yrow.mt <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand
 #' @param SigMat Signature matrix: "SecAct" (bundled) or path to file.
 #' @param lambda Ridge regularization parameter.
 #' @param nrand Number of permutations.
-#' @param rng_method RNG method: "srand" (default) or "gsl".
+#' @param rng_method RNG method: "srand" (default), "gsl", or "gsl_r".
 #' @param is.group.sig Group correlated signatures before regression.
 #' @param is.group.cor Correlation threshold for grouping.
 #' @export
@@ -339,7 +341,7 @@ SecAct.inference.Tcol.st <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand
 #' @param lambda Ridge regularization parameter.
 #' @param nrand Number of permutations.
 #' @param ncores Number of CPU cores (NULL = auto-detect).
-#' @param rng_method RNG method: "srand" (default) or "gsl".
+#' @param rng_method RNG method: "srand" (default), "gsl", or "gsl_r".
 #' @param is.group.sig Group correlated signatures before regression.
 #' @param is.group.cor Correlation threshold for grouping.
 #' @export
@@ -356,7 +358,7 @@ SecAct.inference.Tcol.mt <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand
 #' @param SigMat Signature matrix: "SecAct" (bundled) or path to file.
 #' @param lambda Ridge regularization parameter.
 #' @param nrand Number of permutations.
-#' @param rng_method RNG method: "srand" (default) or "gsl".
+#' @param rng_method RNG method: "srand" (default), "gsl", or "gsl_r".
 #' @param is.group.sig Group correlated signatures before regression.
 #' @param is.group.cor Correlation threshold for grouping.
 #' @export
@@ -375,11 +377,15 @@ SecAct.inference.naive <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand =
   # 2. Observed beta
   beta <- T_mat %*% Y  # (p x m)
 
-  # 3. Permutation table from C (same RNG sequence as C backends)
-  perm_table <- .Call("generate_perm_table",
-                      as.integer(n),
-                      as.integer(nrand),
-                      as.integer(pre$rng_int))
+  # 3. Permutation table: pure R MT19937 or C backend
+  if (pre$rng_method == "gsl_r") {
+    perm_table <- .gsl_mt19937_perm_table(n, nrand)
+  } else {
+    perm_table <- .Call("generate_perm_table",
+                        as.integer(n),
+                        as.integer(nrand),
+                        as.integer(pre$rng_int))
+  }
   # perm_table: (nrand x n) integer matrix, 0-indexed
 
   # 4. Permutation loop (T-column approach)
