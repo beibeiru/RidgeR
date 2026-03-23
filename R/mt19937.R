@@ -64,33 +64,27 @@
   MAGIC <- 2567483615  # 0x9908b0df
   mt_old <- mt
 
-  # Pre-compute y for kk = 1..N-1 (all use original state:
-  # within each loop, mt[kk] and mt[kk+1] are never previously
-  # overwritten — writes go to mt[kk], reads are mt[kk] and mt[kk+1],
-  # and kk advances sequentially)
+  # y values depend only on mt_old (writes advance sequentially,
+  # so mt[kk] and mt[kk+1] are always unmodified when read)
   y <- .or32(.and32(mt_old[1:(N - 1L)], UPPER), .and32(mt_old[2:N], LOWER))
-  mag <- ifelse(y %% 2 == 1, MAGIC, 0)
-  sy <- .xor32(.shr32(y, 1), mag)
+  sy <- .xor32(.shr32(y, 1), ifelse(y %% 2 == 1, MAGIC, 0))
 
-  # Loop 1 (vectorized): kk = 1..227
-  # XOR targets: mt_old[kk+M] (398..624) — all original
+  # Loop 1: kk = 1..227 — XOR targets from original state
   idx1 <- 1L:(N - M)
   mt[idx1] <- .xor32(mt_old[idx1 + M], sy[idx1])
 
-  # Loop 2a (vectorized): kk = 228..454
-  # XOR targets: mt[kk+M-N] = mt[1..227] — all from loop 1
+  # Loop 2a: kk = 228..454 — XOR targets from loop 1 (mt[1..227])
   idx2a <- (N - M + 1L):(2L * (N - M))
   mt[idx2a] <- .xor32(mt[idx2a + M - N], sy[idx2a])
 
-  # Loop 2b (vectorized): kk = 455..623
-  # XOR targets: mt[kk+M-N] = mt[228..396] — all from loop 2a
+  # Loop 2b: kk = 455..623 — XOR targets from loop 2a (mt[228..396])
+  # Cannot merge with 2a: vectorized R reads all RHS before writing
   idx2b <- (2L * (N - M) + 1L):(N - 1L)
   mt[idx2b] <- .xor32(mt[idx2b + M - N], sy[idx2b])
 
-  # Final: kk = N — uses UPDATED mt[1] (from loop 1), not mt_old[1]
-  yN <- .or32(.and32(mt_old[N], UPPER), .and32(mt[1L], LOWER))
-  magN <- if (yN %% 2 == 1) MAGIC else 0
-  mt[N] <- .xor32(mt[M], .xor32(.shr32(yN, 1), magN))
+  # Final: kk = N (uses updated mt[1], not mt_old[1])
+  y <- .or32(.and32(mt_old[N], UPPER), .and32(mt[1L], LOWER))
+  mt[N] <- .xor32(mt[M], .xor32(.shr32(y, 1), if (y %% 2 == 1) MAGIC else 0))
   mt
 }
 
@@ -144,13 +138,11 @@
   gen   <- .mt19937_generate(state, total)
   vals  <- gen$values
 
-  # Pre-compute swap divisors (same for every permutation)
-  ranges  <- n:2L                     # remaining elements per step
-  divisors <- MT_MAX %/% ranges + 1   # (n-1) values
-
-  # Pre-compute ALL swap targets at once (vectorized floor division)
+  # Pre-compute swap targets (bin RNG values into [0, range) per step)
+  divisors <- MT_MAX %/% (n:2L) + 1
   vals_mat <- matrix(vals, nrow = n - 1L, ncol = nrand)
-  j_mat    <- floor(vals_mat / divisors) + (0:(n - 2L)) + 1L  # 1-indexed
+  j_mat    <- vals_mat %/% divisors + seq_len(n - 1L)
+  storage.mode(j_mat) <- "integer"
 
   # Fisher-Yates shuffles with cumulative state
   arr   <- seq_len(n) - 1L  # 0-indexed: 0, 1, ..., n-1
