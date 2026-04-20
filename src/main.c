@@ -15,7 +15,6 @@
 #define CHOLESKY_DECOMP gsl_linalg_cholesky_decomp
 #endif
 #include <string.h>
-#include <time.h>
 #include <math.h>
 
 /* =========================================================
@@ -55,6 +54,7 @@ gsl_matrix *RVectorObject_to_gsl_matrix(double *vec, size_t nr, size_t nc)
 {
   gsl_block  *b = (gsl_block*)malloc(sizeof(gsl_block));
   gsl_matrix *r = (gsl_matrix*)malloc(sizeof(gsl_matrix));
+  if (!b || !r) { free(b); free(r); error("RidgeR: memory allocation failed"); }
   r->size1 = nr;
   r->tda   = r->size2 = nc;
   r->owner = 1;
@@ -93,23 +93,27 @@ void shuffle_gsl(gsl_rng *rng, int array[], const int n)
 
 /* Build the forward permutation table (nrand x n).
    Shared by both Yrow and Tcol cores to guarantee identical RNG streams. */
-static int *build_perm_table(int nrand, size_t n, int rng_method)
+static int *build_perm_table(int nrand, size_t n, int rng_method, unsigned long seed)
 {
   int *table    = (int*)malloc((size_t)nrand * n * sizeof(int));
   int *temp_idx = (int*)malloc(n * sizeof(int));
+  if (!table || !temp_idx) {
+    free(table); free(temp_idx);
+    error("RidgeR: memory allocation failed in build_perm_table");
+  }
   for (size_t k = 0; k < n; k++) temp_idx[k] = (int)k;
 
   gsl_rng *gsl_rng_obj = NULL;
   if (rng_method == RNG_GSL) {
     gsl_rng_obj = gsl_rng_alloc(gsl_rng_mt19937);
-    gsl_rng_set(gsl_rng_obj, 0);
+    gsl_rng_set(gsl_rng_obj, seed);
     for (int i = 0; i < nrand; i++) {
       shuffle_gsl(gsl_rng_obj, temp_idx, (int)n);
       memcpy(&table[(size_t)i * n], temp_idx, n * sizeof(int));
     }
     gsl_rng_free(gsl_rng_obj);
   } else {
-    srand(0);
+    srand((unsigned int)seed);
     for (int i = 0; i < nrand; i++) {
       shuffle_srand(temp_idx, (int)n);
       memcpy(&table[(size_t)i * n], temp_idx, n * sizeof(int));
@@ -182,12 +186,14 @@ void ridgeReg(
   int *n_pt, int *p_pt, int *m_pt,
   double *lambda_pt, double *nrand_pt,
   double *beta_vec, double *se_vec, double *zscore_vec, double *pvalue_vec,
-  int *rng_method_pt)
+  int *rng_method_pt, int *seed_pt)
 {
-  gsl_matrix *X, *Y, *I, *T, *beta, *Y_rand, *beta_rand, *aver, *aver_sq, *zscore, *pvalue;
+  gsl_matrix *X, *Y, *I, *T, *beta, *Y_rand, *beta_rand;
+  gsl_matrix *aver, *aver_sq, *zscore, *pvalue;
   int n = *n_pt, p = *p_pt, m = *m_pt, nrand = (int)*nrand_pt;
   double lambda = *lambda_pt;
   int rng_method = *rng_method_pt;
+  unsigned long seed = (unsigned long)(*seed_pt);
   int *array_index, i, j;
 
   X       = RVectorObject_to_gsl_matrix(X_vec,     n, p);
@@ -203,8 +209,12 @@ void ridgeReg(
   beta_rand = gsl_matrix_alloc(p, m);
   aver      = gsl_matrix_alloc(p, m);
   array_index = (int*)malloc(n * sizeof(int));
+  if (!array_index) error("RidgeR: memory allocation failed in ridgeReg");
 
-  /* Projection: T = (X'X + lambda*I)^-1 * X' */
+  /* Projection: T = (X'X + lambda*I)^-1 * X'
+     Note: inlined here (rather than calling compute_projection) because
+     the legacy .C interface receives X(n*p) while compute_projection
+     expects the transposed Xt(p*n) used by .Call interfaces. */
   gsl_matrix_set_identity(I);
   gsl_blas_dsyrk(CblasLower, CblasTrans, 1.0, X, lambda, I);
   CHOLESKY_DECOMP(I);
@@ -222,9 +232,9 @@ void ridgeReg(
   gsl_rng *gsl_rng_obj = NULL;
   if (rng_method == RNG_GSL) {
     gsl_rng_obj = gsl_rng_alloc(gsl_rng_mt19937);
-    gsl_rng_set(gsl_rng_obj, 0);
+    gsl_rng_set(gsl_rng_obj, seed);
   } else {
-    srand(0);
+    srand((unsigned int)seed);
   }
 
   for (i = 0; i < nrand; i++) {
@@ -294,7 +304,7 @@ void ridgeRegFast_core(
   size_t n, size_t p, size_t m,
   double lambda, int nrand,
   double *beta_vec, double *se_vec, double *zscore_vec, double *pvalue_vec,
-  int num_threads, int rng_method)
+  int num_threads, int rng_method, unsigned long seed)
 {
   /* Defer omp_set_num_threads() to just before the parallel region.
      Calling it for the single-threaded path (num_threads == 1)
@@ -314,7 +324,7 @@ void ridgeRegFast_core(
   gsl_blas_dgemm(CblasNoTrans, CblasTrans, 1.0, T, Yt, 0.0, beta);
 
   /* Build forward permutation table (shared between st and mt paths) */
-  int *perm_table = build_perm_table(nrand, n, rng_method);
+  int *perm_table = build_perm_table(nrand, n, rng_method, seed);
 
   /* Initialise output accumulators */
   R_xlen_t total = (R_xlen_t)p * (R_xlen_t)m;
@@ -454,7 +464,7 @@ void ridgeRegFastTcol_core(
   size_t n, size_t p, size_t m,
   double lambda, int nrand,
   double *beta_vec, double *se_vec, double *zscore_vec, double *pvalue_vec,
-  int num_threads, int rng_method)
+  int num_threads, int rng_method, unsigned long seed)
 {
   /* Defer omp_set_num_threads() to just before the parallel region.
      See Yrow core comment for rationale. */
@@ -475,8 +485,12 @@ void ridgeRegFastTcol_core(
      Forward shuffle → inv_perm[fwd[j]] = j.
      T_perm[:,col] = T[:,inv_perm[col]] mathematically equivalent
      to permuting rows of Y. */
-  int *fwd_table = build_perm_table(nrand, n, rng_method);
+  int *fwd_table = build_perm_table(nrand, n, rng_method, seed);
   int *inv_perm_table = (int*)malloc((size_t)nrand * n * sizeof(int));
+  if (!inv_perm_table) {
+    free(fwd_table);
+    error("RidgeR: memory allocation failed in ridgeRegFastTcol_core");
+  }
   for (int i_rand = 0; i_rand < nrand; i_rand++) {
     int *fwd = &fwd_table[(size_t)i_rand * n];
     int *inv = &inv_perm_table[(size_t)i_rand * n];
@@ -602,11 +616,12 @@ void ridgeRegFastTcol_core(
 
 typedef void (*ridge_core_fn)(double*, double*, size_t, size_t, size_t,
                                double, int, double*, double*, double*, double*,
-                               int, int);
+                               int, int, unsigned long);
 
 static SEXP ridge_interface_common(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp,
                                     SEXP nrand_sexp, SEXP ncores_sexp,
-                                    SEXP rng_method_sexp, ridge_core_fn core_fn)
+                                    SEXP rng_method_sexp, SEXP seed_sexp,
+                                    ridge_core_fn core_fn)
 {
   SEXP x_dim = getAttrib(X_sexp, R_DimSymbol);
   size_t n = (size_t)INTEGER(x_dim)[0];
@@ -623,7 +638,8 @@ static SEXP ridge_interface_common(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp,
   core_fn(REAL(X_sexp), REAL(Y_sexp), n, p, m,
           asReal(lambda_sexp), asInteger(nrand_sexp),
           REAL(beta_s), REAL(se_s), REAL(zscore_s), REAL(pvalue_s),
-          asInteger(ncores_sexp), asInteger(rng_method_sexp));
+          asInteger(ncores_sexp), asInteger(rng_method_sexp),
+          (unsigned long)asInteger(seed_sexp));
 
   SEXP res   = PROTECT(allocVector(VECSXP, 4));
   SEXP names = PROTECT(allocVector(STRSXP, 4));
@@ -637,18 +653,20 @@ static SEXP ridge_interface_common(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp,
 }
 
 SEXP ridgeRegFast_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp,
-                             SEXP nrand_sexp, SEXP ncores_sexp, SEXP rng_method_sexp)
+                             SEXP nrand_sexp, SEXP ncores_sexp, SEXP rng_method_sexp,
+                             SEXP seed_sexp)
 {
   return ridge_interface_common(X_sexp, Y_sexp, lambda_sexp,
-                                 nrand_sexp, ncores_sexp, rng_method_sexp,
+                                 nrand_sexp, ncores_sexp, rng_method_sexp, seed_sexp,
                                  ridgeRegFast_core);
 }
 
 SEXP ridgeRegFastTcol_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp,
-                                 SEXP nrand_sexp, SEXP ncores_sexp, SEXP rng_method_sexp)
+                                 SEXP nrand_sexp, SEXP ncores_sexp, SEXP rng_method_sexp,
+                                 SEXP seed_sexp)
 {
   return ridge_interface_common(X_sexp, Y_sexp, lambda_sexp,
-                                 nrand_sexp, ncores_sexp, rng_method_sexp,
+                                 nrand_sexp, ncores_sexp, rng_method_sexp, seed_sexp,
                                  ridgeRegFastTcol_core);
 }
 
@@ -659,16 +677,18 @@ SEXP ridgeRegFastTcol_interface(SEXP X_sexp, SEXP Y_sexp, SEXP lambda_sexp,
    indices. Uses same RNG sequence as ridgeReg/ridgeRegFast.
    Enables the naive R variant to match C RNG exactly.
    ========================================================= */
-SEXP generate_perm_table(SEXP n_sexp, SEXP nrand_sexp, SEXP rng_method_sexp)
+SEXP generate_perm_table(SEXP n_sexp, SEXP nrand_sexp, SEXP rng_method_sexp,
+                          SEXP seed_sexp)
 {
   int n      = asInteger(n_sexp);
   int nrand  = asInteger(nrand_sexp);
   int rng_method = asInteger(rng_method_sexp);
+  unsigned long seed = (unsigned long)asInteger(seed_sexp);
 
   SEXP result = PROTECT(allocMatrix(INTSXP, nrand, n));
   int *result_ptr = INTEGER(result);
 
-  int *perm_table = build_perm_table(nrand, (size_t)n, rng_method);
+  int *perm_table = build_perm_table(nrand, (size_t)n, rng_method, seed);
 
   /* Store as column-major R matrix (nrand×n): element [i,j] at j*nrand+i */
   for (int i = 0; i < nrand; i++)
@@ -685,14 +705,14 @@ SEXP generate_perm_table(SEXP n_sexp, SEXP nrand_sexp, SEXP rng_method_sexp)
    REGISTRATION
    ========================================================= */
 static const R_CMethodDef cMethods[] = {
-  {"ridgeReg", (DL_FUNC) &ridgeReg, 12},
+  {"ridgeReg", (DL_FUNC) &ridgeReg, 13},
   {NULL, NULL, 0}
 };
 
 static const R_CallMethodDef callMethods[] = {
-  {"ridgeRegFast_interface",     (DL_FUNC) &ridgeRegFast_interface,     6},
-  {"ridgeRegFastTcol_interface", (DL_FUNC) &ridgeRegFastTcol_interface, 6},
-  {"generate_perm_table",        (DL_FUNC) &generate_perm_table,        3},
+  {"ridgeRegFast_interface",     (DL_FUNC) &ridgeRegFast_interface,     7},
+  {"ridgeRegFastTcol_interface", (DL_FUNC) &ridgeRegFastTcol_interface, 7},
+  {"generate_perm_table",        (DL_FUNC) &generate_perm_table,        4},
   {NULL, NULL, 0}
 };
 

@@ -127,14 +127,15 @@
 #'
 #' @param n Number of samples (array length to shuffle).
 #' @param nrand Number of permutations.
+#' @param seed Integer seed (default 0 — GSL remaps to 4357).
 #' @return Integer matrix (nrand x n), 0-indexed (same format as C version).
 #' @keywords internal
-.gsl_mt19937_perm_table <- function(n, nrand) {
+.gsl_mt19937_perm_table <- function(n, nrand, seed = 0L) {
   MT_MAX <- 4294967295  # 2^32 - 1
 
   # Pre-generate all random values (vectorized RNG + tempering)
   total <- as.integer(n - 1L) * nrand
-  state <- .mt19937_new(seed = 0)
+  state <- .mt19937_new(seed = as.integer(seed))
   gen   <- .mt19937_generate(state, total)
   vals  <- gen$values
 

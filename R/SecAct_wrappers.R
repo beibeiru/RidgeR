@@ -69,15 +69,32 @@ sweep_sparse <- function(m, margin, stats, fun) {
 }
 
 #' @keywords internal
-.secact_preprocess <- function(Y, SigMat, is.group.sig, is.group.cor, rng_method) {
-  if (is.matrix(SigMat) || is.data.frame(SigMat)) {
-    X <- SigMat
-  } else if (SigMat == "SecAct") {
-    Xfile <- system.file("extdata", "SecAct.tsv.gz", package = "RidgeR")
-    X <- read.table(Xfile, sep = "\t", check.names = FALSE)
-  } else {
-    X <- read.table(SigMat, sep = "\t", check.names = FALSE)
+.read_sig <- function(path) read.table(path, sep = "\t", check.names = FALSE)
+
+#' @keywords internal
+.load_signature_matrix <- function(sig) {
+  if (is.matrix(sig) || is.data.frame(sig)) {
+    return(list(X = sig, default_lambda = NULL))
   }
+  if (sig == "SecAct") {
+    return(list(X = .read_sig(system.file("extdata", "SecAct.tsv.gz", package = "RidgeR")),
+                default_lambda = 5e+05))
+  }
+  if (grepl("SecAct-", sig, fixed = TRUE)) {
+    return(list(X = .read_sig(paste0("https://hpc.nih.gov/~Jiang_Lab/SecAct_Package/",
+                                     sig, "_filterByPan_ds3_vst.tsv")),
+                default_lambda = 5e+05))
+  }
+  if (sig == "CytoSig") {
+    return(list(X = .read_sig("https://raw.githubusercontent.com/data2intelligence/CytoSig/refs/heads/master/CytoSig/signature.centroid"),
+                default_lambda = 10000))
+  }
+  list(X = .read_sig(sig), default_lambda = NULL)
+}
+
+#' @keywords internal
+.secact_preprocess <- function(Y, SigMat, is.group.sig, is.group.cor, rng_method) {
+  X <- .load_signature_matrix(SigMat)$X
 
   if (is.group.sig) {
     X <- group_signatures(X, cor_threshold = is.group.cor)
@@ -92,8 +109,10 @@ sweep_sparse <- function(m, margin, stats, fun) {
   X <- as.matrix(X[olp, , drop = FALSE])
   Y <- as.matrix(Y[olp, , drop = FALSE])
 
-  X <- scale(X); X[is.na(X)] <- 0
-  Y <- scale(Y); Y[is.na(Y)] <- 0
+  X <- scale(X)
+  X[is.na(X)] <- 0
+  Y <- scale(Y)
+  Y[is.na(Y)] <- 0
 
   list(X = X, Y = Y, rng_int = rng_int, rng_method = rng_method)
 }
@@ -172,7 +191,8 @@ sweep_sparse <- function(m, margin, stats, fun) {
 #' }
 #' @export
 SecAct.inference <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand = 1000,
-                             ncores = NULL, rng_method = "srand", method = "auto",
+                             ncores = NULL, rng_method = "srand", seed = 0L,
+                             method = "auto",
                              is.group.sig = TRUE, is.group.cor = 0.9)
 {
   method <- match.arg(method, c("auto", "Tcol.mt", "Tcol.st", "Yrow.mt", "Yrow.st", "naive", "gsl.old"))
@@ -201,7 +221,8 @@ SecAct.inference <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand = 1000,
     gsl.old = SecAct.inference.gsl.old
   )
   args <- list(Y = Y, SigMat = SigMat, lambda = lambda, nrand = nrand,
-               rng_method = rng_method, is.group.sig = is.group.sig, is.group.cor = is.group.cor)
+               rng_method = rng_method, seed = seed,
+               is.group.sig = is.group.sig, is.group.cor = is.group.cor)
   if (method %in% c("Tcol.mt", "Yrow.mt")) args$ncores <- ncores
   do.call(fn, args)
 }
@@ -223,11 +244,14 @@ SecAct.inference <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand = 1000,
 #' @param is.group.cor Correlation threshold for grouping (default 0.9).
 #' @export
 SecAct.inference.gsl.old <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand = 1000,
-                                     rng_method = "srand", is.group.sig = TRUE, is.group.cor = 0.9)
+                                     rng_method = "srand", seed = 0L,
+                                     is.group.sig = TRUE, is.group.cor = 0.9)
 {
   pre <- .secact_preprocess(Y, SigMat, is.group.sig, is.group.cor, rng_method)
 
-  n <- nrow(pre$X); p <- ncol(pre$X); m <- ncol(pre$Y)
+  n <- nrow(pre$X)
+  p <- ncol(pre$X)
+  m <- ncol(pre$Y)
 
   res <- .C("ridgeReg",
             X = as.double(t(pre$X)),
@@ -236,7 +260,8 @@ SecAct.inference.gsl.old <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand
             as.double(lambda), as.double(nrand),
             beta = double(p * m), se = double(p * m),
             zscore = double(p * m), pvalue = double(p * m),
-            rng_method = as.integer(pre$rng_int)
+            rng_method = as.integer(pre$rng_int),
+            seed = as.integer(seed)
   )
 
   result <- .secact_format_call(res, pre$X, pre$Y)
@@ -257,24 +282,28 @@ SecAct.inference.gsl.old <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand
 #' @param is.group.cor Correlation threshold for grouping (default 0.9).
 #' @export
 SecAct.inference.gsl.new <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand = 1000,
-                                     ncores = NULL, rng_method = "srand", method = "Tcol.mt",
+                                     ncores = NULL, rng_method = "srand", seed = 0L,
+                                     method = "Tcol.mt",
                                      is.group.sig = TRUE, is.group.cor = 0.9)
 {
+  .Deprecated("SecAct.inference")
   method <- match.arg(method, c("Tcol.mt", "Tcol.st", "Yrow.mt", "Yrow.st"))
   SecAct.inference(Y, SigMat = SigMat, lambda = lambda, nrand = nrand,
-                   ncores = ncores, rng_method = rng_method, method = method,
+                   ncores = ncores, rng_method = rng_method, seed = seed,
+                   method = method,
                    is.group.sig = is.group.sig, is.group.cor = is.group.cor)
 }
 
 
 #' @keywords internal
-.secact_call_backend <- function(Y, SigMat, lambda, nrand, ncores, rng_method,
+.secact_call_backend <- function(Y, SigMat, lambda, nrand, ncores, rng_method, seed,
                                   is.group.sig, is.group.cor, c_symbol) {
   pre <- .secact_preprocess(Y, SigMat, is.group.sig, is.group.cor, rng_method)
   if (is.null(ncores)) ncores <- parallel::detectCores(logical = FALSE)
   res <- .Call(c_symbol, pre$X, pre$Y,
                as.numeric(lambda), as.integer(nrand),
-               as.integer(ncores), as.integer(pre$rng_int))
+               as.integer(ncores), as.integer(pre$rng_int),
+               as.integer(seed))
   result <- .secact_format_call(res, pre$X, pre$Y)
   .secact_postprocess(result, is.group.sig)
 }
@@ -293,10 +322,11 @@ SecAct.inference.gsl.new <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand
 #' @param is.group.cor Correlation threshold for grouping.
 #' @export
 SecAct.inference.Yrow.st <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand = 1000,
-                                     rng_method = "srand", is.group.sig = TRUE, is.group.cor = 0.9)
+                                     rng_method = "srand", seed = 0L,
+                                     is.group.sig = TRUE, is.group.cor = 0.9)
 {
   SecAct.inference.Yrow.mt(Y, SigMat = SigMat, lambda = lambda, nrand = nrand,
-                           ncores = 1L, rng_method = rng_method,
+                           ncores = 1L, rng_method = rng_method, seed = seed,
                            is.group.sig = is.group.sig, is.group.cor = is.group.cor)
 }
 
@@ -311,10 +341,10 @@ SecAct.inference.Yrow.st <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand
 #' @param is.group.cor Correlation threshold for grouping.
 #' @export
 SecAct.inference.Yrow.mt <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand = 1000,
-                                     ncores = NULL, rng_method = "srand",
+                                     ncores = NULL, rng_method = "srand", seed = 0L,
                                      is.group.sig = TRUE, is.group.cor = 0.9)
 {
-  .secact_call_backend(Y, SigMat, lambda, nrand, ncores, rng_method,
+  .secact_call_backend(Y, SigMat, lambda, nrand, ncores, rng_method, seed,
                        is.group.sig, is.group.cor, "ridgeRegFast_interface")
 }
 
@@ -328,10 +358,11 @@ SecAct.inference.Yrow.mt <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand
 #' @param is.group.cor Correlation threshold for grouping.
 #' @export
 SecAct.inference.Tcol.st <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand = 1000,
-                                     rng_method = "srand", is.group.sig = TRUE, is.group.cor = 0.9)
+                                     rng_method = "srand", seed = 0L,
+                                     is.group.sig = TRUE, is.group.cor = 0.9)
 {
   SecAct.inference.Tcol.mt(Y, SigMat = SigMat, lambda = lambda, nrand = nrand,
-                           ncores = 1L, rng_method = rng_method,
+                           ncores = 1L, rng_method = rng_method, seed = seed,
                            is.group.sig = is.group.sig, is.group.cor = is.group.cor)
 }
 
@@ -346,10 +377,10 @@ SecAct.inference.Tcol.st <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand
 #' @param is.group.cor Correlation threshold for grouping.
 #' @export
 SecAct.inference.Tcol.mt <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand = 1000,
-                                     ncores = NULL, rng_method = "srand",
+                                     ncores = NULL, rng_method = "srand", seed = 0L,
                                      is.group.sig = TRUE, is.group.cor = 0.9)
 {
-  .secact_call_backend(Y, SigMat, lambda, nrand, ncores, rng_method,
+  .secact_call_backend(Y, SigMat, lambda, nrand, ncores, rng_method, seed,
                        is.group.sig, is.group.cor, "ridgeRegFastTcol_interface")
 }
 
@@ -363,13 +394,16 @@ SecAct.inference.Tcol.mt <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand
 #' @param is.group.cor Correlation threshold for grouping.
 #' @export
 SecAct.inference.naive <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand = 1000,
-                                   rng_method = "srand", is.group.sig = TRUE, is.group.cor = 0.9)
+                                   rng_method = "srand", seed = 0L,
+                                   is.group.sig = TRUE, is.group.cor = 0.9)
 {
   pre <- .secact_preprocess(Y, SigMat, is.group.sig, is.group.cor, rng_method)
   X <- pre$X
   Y <- pre$Y
 
-  n <- nrow(X); p <- ncol(X); m <- ncol(Y)
+  n <- nrow(X)
+  p <- ncol(X)
+  m <- ncol(Y)
 
   # 1. Projection matrix: T = (X'X + lambda*I)^-1 X'
   T_mat <- solve(crossprod(X) + lambda * diag(p), t(X))  # (p x n)
@@ -379,12 +413,13 @@ SecAct.inference.naive <- function(Y, SigMat = "SecAct", lambda = 5e+05, nrand =
 
   # 3. Permutation table: pure R MT19937 or C backend
   if (pre$rng_method == "gsl_r") {
-    perm_table <- .gsl_mt19937_perm_table(n, nrand)
+    perm_table <- .gsl_mt19937_perm_table(n, nrand, seed = as.integer(seed))
   } else {
     perm_table <- .Call("generate_perm_table",
                         as.integer(n),
                         as.integer(nrand),
-                        as.integer(pre$rng_int))
+                        as.integer(pre$rng_int),
+                        as.integer(seed))
   }
   # perm_table: (nrand x n) integer matrix, 0-indexed
 
@@ -494,20 +529,10 @@ SecAct.activity.inference <- function(
   }
 
   # --- Load signature matrix ---
-  if (sigMatrix == "SecAct") {
-    Xfile <- system.file("extdata", "SecAct.tsv.gz", package = "RidgeR")
-    X <- read.table(Xfile, sep = "\t", check.names = FALSE)
-    if (is.null(lambda)) lambda <- 5e+05
-  } else if (grepl("SecAct-", sigMatrix, fixed = TRUE)) {
-    Xfile <- paste0("https://hpc.nih.gov/~Jiang_Lab/SecAct_Package/", sigMatrix, "_filterByPan_ds3_vst.tsv")
-    X <- read.table(Xfile, sep = "\t", check.names = FALSE)
-    if (is.null(lambda)) lambda <- 5e+05
-  } else if (sigMatrix == "CytoSig") {
-    Xfile <- "https://raw.githubusercontent.com/data2intelligence/CytoSig/refs/heads/master/CytoSig/signature.centroid"
-    X <- read.table(Xfile, sep = "\t", check.names = FALSE)
-    if (is.null(lambda)) lambda <- 10000
-  } else {
-    X <- read.table(sigMatrix, sep = "\t", check.names = FALSE)
+  loaded <- .load_signature_matrix(sigMatrix)
+  X <- loaded$X
+  if (is.null(lambda) && !is.null(loaded$default_lambda)) {
+    lambda <- loaded$default_lambda
   }
 
   # --- Filter signatures ---
